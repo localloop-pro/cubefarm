@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lostConversation, resumableSession } from './cliRunner.ts';
+import { hasCallbackRoute, lostConversation, resumableSession } from './cliRunner.ts';
 
 describe('resumableSession', () => {
   const onDisk = (files: string[]) => (file: string) => files.includes(file);
@@ -26,5 +26,13 @@ describe('lostConversation', () => {
 
   it('ignores other screens', () => {
     expect(lostConversation('Claude Code v2.1.280\n❯ ')).toBe(false);
+  });
+});
+
+describe('hasCallbackRoute', () => {
+  it('knows no token that no live session registered, and invokes nothing', () => {
+    expect(hasCallbackRoute('hooks', 'not-a-token')).toBe(false);
+    expect(hasCallbackRoute('mcp', 'not-a-token')).toBe(false);
+    expect(hasCallbackRoute('hooks', '')).toBe(false);
   });
 });

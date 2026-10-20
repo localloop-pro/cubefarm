@@ -10,7 +10,7 @@ import { DAY_PARTS } from '../shared/speech.ts';
 import { DEMO, DEMO_SCALE, PORT, STATE_FILE, VERSION, WORKSPACE_ROOT } from './config.ts';
 import { MACHINES_DIR } from './workspace.ts';
 import { realBackend } from './backend.ts';
-import { handleHook, handleMcp, setOfficeUrl } from './cliRunner.ts';
+import { handleHook, handleMcp, hasCallbackRoute, setOfficeUrl } from './cliRunner.ts';
 import { createDemoBackend } from './demo.ts';
 import { parseRange } from './journal.ts';
 import { underLauncher } from './officeUpdate.ts';
@@ -18,6 +18,7 @@ import { serviceWorkerSource, swVersion } from './pwa.ts';
 import { screenStatus } from './screenReply.ts';
 import { parseSendBackNote } from './sendBack.ts';
 import { PresenceHub } from './presence.ts';
+import { officeRequest, type OfficeBoundary } from './requestBoundary.ts';
 import { HttpError, Swarm } from './swarm.ts';
 
 const swarm = new Swarm(DEMO ? createDemoBackend(DEMO_SCALE) : realBackend);
@@ -28,6 +29,24 @@ if (PORT) setOfficeUrl(`http://127.0.0.1:${PORT}`);
 await swarm.init();
 
 const app = express();
+// The browser boundary (Host, Origin, Sec-Fetch-Site). The Vite dev client's port is allowed too: it proxies with its own Host.
+let boundary: OfficeBoundary = { port: PORT, dev: true, clientPort: Number(process.env.SWARM_CLIENT_PORT || 5317) };
+const check = (req: http.IncomingMessage, isUpgrade: boolean) =>
+  officeRequest({ method: req.method ?? '', headers: req.headers, rawHeaders: req.rawHeaders, url: req.url ?? '', isUpgrade }, boundary);
+// The only originless exceptions: exact callback paths with a live session's token, checked before any body is read.
+const callback = /^\/api\/(hooks|mcp)\/([A-Za-z0-9-]+)$/;
+app.use((req, res, next) => {
+  const match = callback.exec(req.path);
+  if (match) {
+    const kind = match[1] as 'hooks' | 'mcp';
+    if (hasCallbackRoute(kind, match[2])) return next();
+    if (kind === 'mcp') return void res.status(404).json({ jsonrpc: '2.0', error: { code: -32001, message: 'This session has ended.' }, id: null });
+    return void res.status(403).json({ error: 'unknown token' });
+  }
+  const decision = check(req, false);
+  if (!decision.allow) return void res.status(decision.status).json({ error: `forbidden: ${decision.reason}` });
+  next();
+});
 // Agent CLIs calling back: hooks (a tool result can be a large screenshot, hence the limit) and the CEO's office tools.
 // The token in the path is the session's; unknown tokens get an empty answer.
 app.post('/api/hooks/:token', express.json({ limit: '64mb' }), (req, res) => void res.json(handleHook(String(req.params.token), req.body)));
@@ -323,6 +342,11 @@ wss.on('connection', (ws) => {
 });
 terms.on('connection', (ws, req) => swarm.attachTerminal(new URL(req.url ?? '', 'http://localhost').searchParams.get('agent') ?? '', ws));
 server.on('upgrade', (req, socket, head) => {
+  const decision = check(req, true);
+  if (!decision.allow) {
+    socket.end(`HTTP/1.1 ${decision.status} Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+    return;
+  }
   const { pathname } = new URL(req.url ?? '', 'http://localhost');
   const target = pathname === '/ws' ? wss : pathname === '/ws/term' ? terms : null;
   if (!target) return void socket.destroy();
@@ -330,7 +354,9 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-  setOfficeUrl(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
+  const port = (server.address() as AddressInfo).port;
+  boundary = { ...boundary, port };
+  setOfficeUrl(`http://127.0.0.1:${port}`);
   const scale = DEMO_SCALE ? `, ${DEMO_SCALE.floors} floors × ${DEMO_SCALE.agents} people` : '';
   console.log(`\n  🏢 cubefarm ${VERSION} on http://localhost:${PORT}${DEMO ? `  (DEMO MODE: fake GitHub + fake agents${scale})` : ''}`);
   console.log(`     state: ${STATE_FILE}`);

@@ -66,6 +66,12 @@ interface Route {
 }
 const routes = new Map<string, Route>();
 
+/** Whether a live session owns this token (for MCP: one serving office tools). Pure lookup, invokes nothing. */
+export function hasCallbackRoute(kind: 'hooks' | 'mcp', token: string): boolean {
+  const route = routes.get(token);
+  return !!route && (kind === 'hooks' || !!route.office);
+}
+
 /** A hook, status line or notify call from a CLI (POST /api/hooks/:token). The answer is the hook's output. */
 export function handleHook(token: string, body: unknown): Record<string, unknown> {
   const route = routes.get(token);
