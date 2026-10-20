@@ -6,7 +6,8 @@ import { DAY_MS } from '../shared/careers.ts';
 const R = 'demo-co/pixel-todo';
 const NAME = 'demo-co/pixel-todo';
 // Local times, so the day and night rules read the same in every time zone.
-const at = (h: number, m = 0, day = 4) => new Date(2026, 9, day, h, m).getTime();
+// July avoids Sydney's October daylight-saving gap at 02:00.
+const at = (h: number, m = 0, day = 4) => new Date(2026, 6, day, h, m).getTime();
 const NOON = at(12);
 
 function run(s: LedgerState, ...events: LedgerEvent[]) {
