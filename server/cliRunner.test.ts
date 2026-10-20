@@ -1,5 +1,45 @@
-import { describe, expect, it } from 'vitest';
-import { hasCallbackRoute, lostConversation, resumableSession } from './cliRunner.ts';
+import { describe, expect, it, vi } from 'vitest';
+import path from 'node:path';
+import { HOME_DIR } from './config.ts';
+import { hasCliRoute, lostConversation, reconnectClis, resumableSession } from './cliRunner.ts';
+import type { AgentTerminal } from './terminal.ts';
+import { adoptPty, startKeeper } from './ptyClient.ts';
+
+vi.mock('./ptyClient.ts', async (original) => ({
+  ...await original<typeof import('./ptyClient.ts')>(), startKeeper: vi.fn(), adoptPty: vi.fn(),
+}));
+
+describe('hasCliRoute', () => {
+  it('refuses unknown or malformed tokens without starting a keeper', () => {
+    for (const token of ['', 'unknown', '../token', 'token%2fx']) {
+      expect(hasCliRoute(token, 'hooks')).toBe(false);
+      expect(hasCliRoute(token, 'mcp')).toBe(false);
+    }
+    expect(startKeeper).not.toHaveBeenCalled();
+  });
+
+  it('finds a reconnected hook token without invoking its hook or granting office tools', async () => {
+    vi.useFakeTimers();
+    try {
+      let exited: (code: number) => void = () => undefined;
+      const term = { bind: vi.fn(), note: vi.fn(), cols: 80, rows: 24 } as unknown as AgentTerminal;
+      vi.mocked(startKeeper).mockResolvedValueOnce([{
+        id: 'held', pid: 123, exit: null,
+        meta: { agentId: 'ada', cli: 'claude', token: 'reconnected-hook', dir: path.join(HOME_DIR, 'route-lookup-test'), busy: false },
+      }]);
+      vi.mocked(adoptPty).mockReturnValueOnce({ pid: 123, write: vi.fn(), resize: vi.fn(), kill: vi.fn(), setMeta: vi.fn(), onData: vi.fn(), onExit: (fn) => { exited = fn; } });
+      await reconnectClis(() => term);
+      expect(hasCliRoute('reconnected-hook', 'hooks')).toBe(true);
+      expect(hasCliRoute('reconnected-hook', 'mcp')).toBe(false);
+      expect(term.note).not.toHaveBeenCalled();
+      exited(0);
+      expect(hasCliRoute('reconnected-hook', 'hooks')).toBe(false);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe('resumableSession', () => {
   const onDisk = (files: string[]) => (file: string) => files.includes(file);
@@ -26,13 +66,5 @@ describe('lostConversation', () => {
 
   it('ignores other screens', () => {
     expect(lostConversation('Claude Code v2.1.280\n❯ ')).toBe(false);
-  });
-});
-
-describe('hasCallbackRoute', () => {
-  it('knows no token that no live session registered, and invokes nothing', () => {
-    expect(hasCallbackRoute('hooks', 'not-a-token')).toBe(false);
-    expect(hasCallbackRoute('mcp', 'not-a-token')).toBe(false);
-    expect(hasCallbackRoute('hooks', '')).toBe(false);
   });
 });

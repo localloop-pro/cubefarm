@@ -66,10 +66,10 @@ interface Route {
 }
 const routes = new Map<string, Route>();
 
-/** Whether a live session owns this token (for MCP: one serving office tools). Pure lookup, invokes nothing. */
-export function hasCallbackRoute(kind: 'hooks' | 'mcp', token: string): boolean {
+/** Read-only authorization before parsing callback bodies; hooks and office tools have distinct capabilities. */
+export function hasCliRoute(token: string, kind: 'hooks' | 'mcp'): boolean {
   const route = routes.get(token);
-  return !!route && (kind === 'hooks' || !!route.office);
+  return route !== undefined && (kind === 'hooks' || route.office !== undefined);
 }
 
 /** A hook, status line or notify call from a CLI (POST /api/hooks/:token). The answer is the hook's output. */
