@@ -97,11 +97,11 @@ const failed = (c: Check) => BAD.includes(c.conclusion ?? '') || BAD.includes(c.
 const pending = (c: Check) => (!!c.status && c.status !== 'COMPLETED') || c.state === 'PENDING' || c.state === 'EXPECTED';
 const checkName = (c: Check) => c.name || c.context || 'check';
 
-function checksOf(rollup: RawPull['statusCheckRollup']): PullInfo['checks'] {
+export function checksOf(rollup: RawPull['statusCheckRollup']): PullInfo['checks'] {
   if (!rollup || rollup.length === 0) return 'none';
   if (rollup.some(failed)) return 'failing';
   if (rollup.some(pending)) return 'pending';
-  return 'passing';
+  return rollup.some((c) => c.conclusion === 'SUCCESS' || c.state === 'SUCCESS') ? 'passing' : 'none';
 }
 
 /**

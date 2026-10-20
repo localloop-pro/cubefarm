@@ -19,6 +19,7 @@ import { screenStatus } from './screenReply.ts';
 import { parseSendBackNote } from './sendBack.ts';
 import { PresenceHub } from './presence.ts';
 import { HttpError, Swarm } from './swarm.ts';
+import { trustedOfficeRequest } from './requestBoundary.ts';
 
 const swarm = new Swarm(DEMO ? createDemoBackend(DEMO_SCALE) : realBackend);
 // Who else is in the 3D office (shared presence): relayed between tabs over /ws, never saved. The demo adds fake visitors.
@@ -28,6 +29,12 @@ if (PORT) setOfficeUrl(`http://127.0.0.1:${PORT}`);
 await swarm.init();
 
 const app = express();
+const clientPort = underLauncher() ? Number(process.env.SWARM_CLIENT_PORT || 5317) : undefined;
+const trusted = (req: http.IncomingMessage) => trustedOfficeRequest(req.headers, req.socket.localPort ?? PORT, clientPort);
+app.use((req, res, next) => {
+  if (!trusted(req)) return void res.status(403).json({ error: 'Only the local office may access this service.' });
+  next();
+});
 // Agent CLIs calling back: hooks (a tool result can be a large screenshot, hence the limit) and the CEO's office tools.
 // The token in the path is the session's; unknown tokens get an empty answer.
 app.post('/api/hooks/:token', express.json({ limit: '64mb' }), (req, res) => void res.json(handleHook(String(req.params.token), req.body)));
@@ -323,6 +330,10 @@ wss.on('connection', (ws) => {
 });
 terms.on('connection', (ws, req) => swarm.attachTerminal(new URL(req.url ?? '', 'http://localhost').searchParams.get('agent') ?? '', ws));
 server.on('upgrade', (req, socket, head) => {
+  if (!trusted(req)) {
+    socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    return;
+  }
   const { pathname } = new URL(req.url ?? '', 'http://localhost');
   const target = pathname === '/ws' ? wss : pathname === '/ws/term' ? terms : null;
   if (!target) return void socket.destroy();

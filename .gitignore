@@ -2,6 +2,7 @@ node_modules
 dist
 dist-server
 .env
+.swarm-home/
 *.log
 playwright-report
 test-results

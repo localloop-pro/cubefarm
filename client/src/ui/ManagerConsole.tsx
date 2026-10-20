@@ -657,6 +657,10 @@ function SettingsTab() {
           <span>Session limit</span>
           <input type="number" min={0} placeholder="No limit" defaultValue={settings.sessionLimit || ''} onBlur={(e) => set({ sessionLimit: Number(e.target.value) || 0 })} />
         </label>
+        <label className="toggle">
+          <input type="checkbox" checked={settings.schedulingPaused === true} onChange={(e) => set({ schedulingPaused: e.target.checked })} /> Pause queued work
+        </label>
+        <p className="muted small">Pauses queued development, QA, fixes and CEO jobs. Running sessions continue; direct developer assignments and messages remain available.</p>
         <p className="muted small">
           Leave empty so every agent with work runs at once. Agents on the same coding agent share its subscription's usage limits, and each one is its own process on this PC, so set a limit if
           you hit either.

@@ -29,7 +29,7 @@ const record = (r: Partial<MergeRecord> = {}): MergeRecord => ({
 describe('mergeStep', () => {
   it('merges a clean, green PR at the commit QA passed', () => {
     expect(mergeStep(pull(), record(), NOW, base)).toEqual({ do: 'merge', set: { pendingSince: null } });
-    expect(mergeStep(pull({ checks: 'none' }), record(), NOW, base).do).toBe('merge');
+    expect(mergeStep(pull({ checks: 'none' }), record(), NOW, base).do).toBe('wait');
   });
 
   it('waits on a draft without touching the record', () => {
@@ -55,7 +55,7 @@ describe('mergeStep', () => {
     });
 
     it('carries on with the details once GitHub knows', () => {
-      expect(mergeStep(pull({ mergeState: 'UNKNOWN' }), record(), NOW, { ...base, detailed: true }).do).toBe('merge');
+      expect(mergeStep(pull({ mergeState: 'UNKNOWN' }), record(), NOW, { ...base, detailed: true }).do).toBe('wait');
       expect(mergeStep(pull({ mergeable: 'CONFLICTING' }), record(), NOW, { ...base, detailed: true }).do).toBe('send-back');
     });
   });
@@ -69,12 +69,18 @@ describe('mergeStep', () => {
       expect(mergeStep(pull({ headSha: 'new456', mergeable: 'CONFLICTING', checks: 'failing' }), record(), NOW, base).do).toBe('requeue');
     });
 
-    it('adopts the head as the passed commit for records from before commits were tracked', () => {
+    it('requires a fresh QA round for a legacy pass without a commit', () => {
       expect(mergeStep(pull({ headSha: 'def789' }), record({ passedSha: null }), NOW, base)).toEqual({
-        do: 'merge',
-        set: { passedSha: 'def789', pendingSince: null },
+        do: 'requeue',
+        set: {},
       });
     });
+  });
+
+  it('refuses blocked or unstable GitHub merge states', () => {
+    for (const mergeState of ['BLOCKED', 'UNSTABLE', 'UNKNOWN']) {
+      expect(mergeStep(pull({ mergeState }), record(), NOW, { ...base, detailed: true }).do).toBe('wait');
+    }
   });
 
   describe('conflicts', () => {
