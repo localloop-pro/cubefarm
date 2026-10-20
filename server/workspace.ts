@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { HOME_DIR, WORKSPACE_ROOT } from './config.ts';
@@ -297,6 +298,91 @@ async function removeDir(dir: string) {
   await fs.rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
 }
 
+// ---------- preservation ----------
+// Before anything replaces or deletes a worktree or a branch: a worktree with changes (untracked files included) is
+// left alone, and a commit on no remote branch is first pinned to a recovery ref that is checked to resolve to it.
+// Any failure refuses the operation; nothing falls through to the destructive step.
+
+/** Where recovery refs live: the office never fetches, pushes or sweeps them. */
+export const RECOVERY_NS = 'refs/cubefarm-recovery';
+
+/** A destructive operation refused so as not to lose work. */
+export class PreservationError extends Error {}
+
+const refPart = (s: string) => s.replace(/[^A-Za-z0-9_/-]+/g, '-').replace(/\/{2,}/g, '/').replace(/^[/-]+|[/-]+$/g, '') || 'x';
+
+/**
+ * Keep `sha` (a commit in the repo at `cwd`) reachable: nothing to do when a remote branch (or, in the same repo, a
+ * recovery ref) already has it, else a new recovery ref in the repo at `into`, verified to resolve to `sha`. Returns
+ * the ref made, or null. Throws PreservationError when the ref can't be made or verified.
+ */
+export async function preserveCommit(cwd: string, sha: string, label: string, into = cwd): Promise<string | null> {
+  const g = (args: string[], dir = cwd) => git(args, { cwd: dir, timeoutMs: 60_000 });
+  const same = samePath(path.resolve(cwd), path.resolve(into));
+  let ref = '';
+  try {
+    const known = ['--remotes', ...(same ? [`--glob=${RECOVERY_NS}`] : [])];
+    if (Number(await g(['rev-list', '--count', sha, '--not', ...known])) === 0) return null;
+    ref = `${RECOVERY_NS}/${refPart(label)}/${stamp(new Date())}-${sha.slice(0, 12)}-${randomBytes(4).toString('hex')}`;
+    // An empty old value: the ref must not exist yet, so a recovery ref is never overwritten.
+    if (same) await g(['update-ref', ref, sha, '']);
+    else await g(['push', '-q', '--no-verify', into, `${sha}:${ref}`]);
+    const got = await g(['rev-parse', '--verify', '-q', `${ref}^{commit}`], into);
+    if (got !== sha) {
+      // Not left behind: a later check would take the commit for kept.
+      if (same) await g(['update-ref', '-d', ref]).catch(() => undefined);
+      throw new Error(`${ref} resolves to ${got || 'nothing'}`);
+    }
+    return ref;
+  } catch (err) {
+    throw new PreservationError(`Could not keep commit ${sha.slice(0, 12)} (${label}) in a recovery ref${ref ? ` ${ref}` : ''}: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Check a worktree before it is reset, cleaned or removed: refuse (PreservationError, logged) when it can't be read
+ * or has any change, untracked files included; else keep its HEAD reachable (preserveCommit into `into`).
+ */
+export async function guardWorktree(wt: string, into?: string): Promise<string | null> {
+  try {
+    const g = (args: string[]) => git(['--no-optional-locks', ...args], { cwd: wt, timeoutMs: 60_000 });
+    let top: string, dirty: string, head: string, branch: string;
+    try {
+      top = await g(['rev-parse', '--show-toplevel']);
+      dirty = await g(['status', '--porcelain', '--untracked-files=all']);
+      head = await g(['rev-parse', '--verify', '-q', 'HEAD']).catch(() => '');
+      branch = head ? await g(['rev-parse', '--abbrev-ref', 'HEAD']) : '';
+    } catch (err) {
+      throw new PreservationError(`Could not read the worktree ${wt}, so it is left as it is: ${(err as Error).message}`);
+    }
+    // A folder that lost its .git would show git's view of some parent repository instead.
+    const real = (p: string) => fs.realpath(p).catch(() => path.resolve(p));
+    if (!samePath(await real(top), await real(wt))) throw new PreservationError(`${wt} is not a worktree of its own (git sees ${top}), so it is left as it is.`);
+    if (dirty) throw new PreservationError(`${wt} has uncommitted changes (${fileList(porcelainPaths(dirty))}), so it is left as it is.`);
+    return head ? await preserveCommit(wt, head, branch && branch !== 'HEAD' ? branch : `detached/${path.basename(wt)}`, into ?? wt) : null;
+  } catch (err) {
+    console.warn(`[workspace] ${(err as Error).message}`);
+    throw err;
+  }
+}
+
+/** Delete local branches, each only once its tip is kept (preserveCommit); a branch that can't be kept is skipped and logged. */
+async function deleteBranches(cwd: string, branches: string[]): Promise<void> {
+  const g = (args: string[]) => git(args, { cwd, timeoutMs: 60_000 });
+  const safe: string[] = [];
+  for (const b of branches) {
+    try {
+      const tip = await g(['rev-parse', '--verify', '-q', `refs/heads/${b}^{commit}`]);
+      await preserveCommit(cwd, tip, b);
+      safe.push(b);
+    } catch (err) {
+      console.warn(`[workspace] Skipped deleting branch ${b} in ${cwd}: ${(err as Error).message}`);
+    }
+  }
+  // A few dozen per command (a floor can have hundreds); git deletes what it can and complains about the rest.
+  for (let i = 0; i < safe.length; i += 40) await g(['branch', '-D', ...safe.slice(i, i + 40)]).catch(() => undefined);
+}
+
 /** A git lock file this old was left by a git that died: nothing still running holds it. */
 const STALE_LOCK_MS = 10 * 60_000;
 
@@ -372,6 +458,14 @@ async function setUpWorktree(main: string, wt: string, fullName: string, base: D
   const local = holder ? null : branch;
   if (holder) note?.(`${branch} is checked out at ${holder}, so this desk works on it as a detached HEAD at ${ref}; push with git push origin HEAD:${branch}.`);
 
+  // `-B` below moves the branch wherever it was: keep its old tip first. Then the desk itself: refused when it has
+  // changes, its HEAD kept. Refusals throw from here, before any reuse or rebuild.
+  if (local) {
+    const tip = await git(['rev-parse', '--verify', '-q', `refs/heads/${local}^{commit}`], { cwd: main }).catch(() => '');
+    if (tip) await preserveCommit(main, tip, local);
+  }
+  if (await exists(path.join(wt, '.git'))) await guardWorktree(wt);
+
   // Reuse the desk's worktree in place. Deleting it fails on Windows while any process (a dev server
   // the agent left running, a browser) still has its working directory inside, and reuse keeps
   // node_modules warm between tasks.
@@ -416,6 +510,7 @@ export function removeDesk(fullName: string, agentSlug: string, main = mainDir(f
   return withRepoLock(fullName, async () => {
     const wt = deskDir(fullName, agentSlug);
     if (!(await exists(wt))) return;
+    if (await exists(path.join(wt, '.git'))) await guardWorktree(wt);
     await git(['worktree', 'remove', '--force', wt], { cwd: main }).catch(() => undefined);
     await removeDir(wt).catch(() => undefined);
     await git(['worktree', 'prune'], { cwd: main }).catch(() => undefined);
@@ -584,6 +679,7 @@ export function sweepDesks(fullName: string, keep: SweepKeep): Promise<SweepResu
     for (const wt of plan.worktrees) {
       try {
         if (await inUse(wt.path)) throw new Error('in use');
+        await guardWorktree(wt.path);
         const patch = await saveLeftovers(fullName, wt.path);
         if (patch) result.patches.push(patch);
         await g(['worktree', 'remove', '--force', wt.path]).catch(() => undefined);
@@ -599,6 +695,7 @@ export function sweepDesks(fullName: string, keep: SweepKeep): Promise<SweepResu
       const dir = path.join(deskRoot, name);
       try {
         if (await inUse(dir)) throw new Error('in use');
+        if (await exists(path.join(dir, '.git'))) await guardWorktree(dir);
         await removeDir(dir);
         result.folders++;
       } catch {
@@ -606,8 +703,7 @@ export function sweepDesks(fullName: string, keep: SweepKeep): Promise<SweepResu
       }
     }
     const doomed = plan.branches.filter((b) => !held.has(b));
-    // A few dozen per command (a floor can have hundreds); git deletes what it can and complains about the rest.
-    for (let i = 0; i < doomed.length; i += 40) await g(['branch', '-D', ...doomed.slice(i, i + 40)]).catch(() => undefined);
+    await deleteBranches(main, doomed);
     if (doomed.length) {
       const left = new Set((await g(['for-each-ref', '--format=%(refname)', 'refs/heads/swarm', 'refs/heads/qa'])).split(/\r?\n/));
       result.branches = doomed.filter((b) => !left.has(`refs/heads/${b}`)).length;
@@ -874,7 +970,7 @@ export function sweepMachine(machine: string, fullName: string, keep: string[]):
     const out = parseWorktrees(await g(['worktree', 'list', '--porcelain'])).map((w) => w.branch);
     const list = async () => (await g(['for-each-ref', '--format=%(refname)', 'refs/heads/swarm', 'refs/heads/qa'])).split(/\r?\n/).filter(Boolean).map((r) => r.replace(/^refs\/heads\//, ''));
     const doomed = (await list()).filter((b) => OFFICE_BRANCH.test(b) && !keep.includes(b) && !out.includes(b));
-    for (let i = 0; i < doomed.length; i += 40) await g(['branch', '-D', ...doomed.slice(i, i + 40)]).catch(() => undefined);
+    await deleteBranches(clone, doomed);
     if (!doomed.length) return 0;
     const left = new Set(await list());
     return doomed.filter((b) => !left.has(b)).length;
@@ -890,6 +986,25 @@ export async function removeMachine(machine: string): Promise<{ removed: boolean
   const dir = machineDir(machine);
   if (!(await exists(dir))) return { removed: true, patches: [] };
   if (await inUse(dir)) return { removed: false, patches: [] };
+  // The clones go with the machine: their worktrees must be clean, and every commit on no remote branch (worktree
+  // HEADs, local branches, recovery refs) is kept in the floor's checkout first. Anything that can't be: it stays.
+  try {
+    for (const name of await fs.readdir(path.join(dir, 'work')).catch(() => [])) {
+      const wt = path.join(dir, 'work', name);
+      if (await exists(path.join(wt, '.git'))) await guardWorktree(wt, mainDir(name.replace('__', '/')));
+    }
+    for (const name of await fs.readdir(path.join(dir, 'repos')).catch(() => [])) {
+      const clone = path.join(dir, 'repos', name);
+      if (!(await exists(path.join(clone, '.git')))) continue;
+      const refs = await git(['for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads', RECOVERY_NS], { cwd: clone });
+      for (const [sha, ref] of refs.split(/\r?\n/).filter(Boolean).map((l) => l.split(' '))) {
+        await preserveCommit(clone, sha, `machine-${machine}/${ref.replace(/^refs\/(heads\/)?/, '')}`, mainDir(name.replace('__', '/')));
+      }
+    }
+  } catch (err) {
+    console.warn(`[workspace] Machine ${machine} stays: ${(err as Error).message}`);
+    return { removed: false, patches: [] };
+  }
   const patches: string[] = [];
   for (const name of await fs.readdir(path.join(dir, 'work')).catch(() => [])) {
     const patch = await saveLeftovers(name.replace('__', '/'), path.join(dir, 'work', name), `machine-${machine}`).catch(() => null);
