@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkRunOf, readTwice } from './github.ts';
+import { checkRunOf, checksOf, readTwice, toPrDetails } from './github.ts';
 
 describe('readTwice', () => {
   it('tries a failed read once more', async () => {
@@ -39,5 +39,62 @@ describe('checkRunOf', () => {
     expect(checkRunOf([{ context: 'Vercel', state: 'SUCCESS' }])).toBeNull();
     expect(checkRunOf([])).toBeNull();
     expect(checkRunOf(null)).toBeNull();
+  });
+});
+
+describe('checksOf', () => {
+  it('is none without checks, never passing', () => {
+    expect(checksOf(null)).toBe('none');
+    expect(checksOf([])).toBe('none');
+  });
+
+  it('is none when every check was neutral or skipped', () => {
+    expect(checksOf([{ name: 'a', status: 'COMPLETED', conclusion: 'SKIPPED' }, { name: 'b', status: 'COMPLETED', conclusion: 'NEUTRAL' }])).toBe('none');
+  });
+
+  it('passes once one check succeeded beside skipped ones', () => {
+    expect(checksOf([{ name: 'a', status: 'COMPLETED', conclusion: 'SKIPPED' }, { name: 'b', status: 'COMPLETED', conclusion: 'SUCCESS' }])).toBe('passing');
+    expect(checksOf([{ context: 'vercel', state: 'SUCCESS' }])).toBe('passing');
+  });
+
+  it('fails or waits before anything else', () => {
+    expect(checksOf([{ name: 'a', status: 'COMPLETED', conclusion: 'SKIPPED' }, { name: 'b', status: 'COMPLETED', conclusion: 'FAILURE' }])).toBe('failing');
+    expect(checksOf([{ name: 'a', status: 'COMPLETED', conclusion: 'SKIPPED' }, { name: 'b', status: 'IN_PROGRESS' }])).toBe('pending');
+  });
+});
+
+describe('toPrDetails', () => {
+  const raw = {
+    number: 7,
+    title: 't',
+    body: 'b',
+    url: 'u',
+    headRefName: 'swarm/x',
+    headRefOid: 'abc123',
+    isCrossRepository: false,
+    closingIssuesReferences: [{ number: 4 }],
+    state: 'OPEN' as const,
+    isDraft: true,
+    reviewDecision: 'APPROVED',
+    mergeable: 'MERGEABLE',
+    mergeStateStatus: 'CLEAN',
+    statusCheckRollup: [{ name: 'ci', status: 'COMPLETED', conclusion: 'SKIPPED' }],
+  };
+
+  it('fills state, draft, review, head, mergeability and checks from one view', () => {
+    expect(toPrDetails(raw)).toMatchObject({
+      state: 'OPEN',
+      isDraft: true,
+      reviewDecision: 'APPROVED',
+      headSha: 'abc123',
+      mergeable: 'MERGEABLE',
+      mergeState: 'CLEAN',
+      checks: 'none',
+      closesIssues: [4],
+    });
+  });
+
+  it('reads an empty review decision as null and a missing rollup as none', () => {
+    expect(toPrDetails({ ...raw, reviewDecision: '', statusCheckRollup: null, mergeStateStatus: '' })).toMatchObject({ reviewDecision: null, checks: 'none', mergeState: 'UNKNOWN' });
   });
 });
