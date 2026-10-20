@@ -66,6 +66,12 @@ interface Route {
 }
 const routes = new Map<string, Route>();
 
+/** Read-only authorization before parsing callback bodies; hooks and office tools have distinct capabilities. */
+export function hasCliRoute(token: string, kind: 'hooks' | 'mcp'): boolean {
+  const route = routes.get(token);
+  return route !== undefined && (kind === 'hooks' || route.office !== undefined);
+}
+
 /** A hook, status line or notify call from a CLI (POST /api/hooks/:token). The answer is the hook's output. */
 export function handleHook(token: string, body: unknown): Record<string, unknown> {
   const route = routes.get(token);

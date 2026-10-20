@@ -1,135 +1,101 @@
 import { describe, expect, it } from 'vitest';
-import { checkRequest, type BoundaryHeaders, type BoundaryRequest } from './requestBoundary.ts';
+import { officeRequest, type OfficeRequest } from './requestBoundary.ts';
 
-const PORT = 4400;
-const CLIENT = 5400;
-const prod = { port: PORT };
-const dev = { port: PORT, clientPort: CLIENT };
-
-function req(headers: BoundaryHeaders, extra: Partial<BoundaryRequest> = {}): BoundaryRequest {
-  return { method: 'GET', url: '/api/state', isUpgrade: false, headers, ...extra };
-}
-const allowed = (r: BoundaryRequest, opts = prod) => checkRequest(r, opts).allow;
-const reason = (r: BoundaryRequest, opts = prod) => {
-  const d = checkRequest(r, opts);
-  return d.allow ? 'allowed' : d.reason;
-};
-
-describe('Host', () => {
-  it.each(['127.0.0.1', 'localhost', '[::1]'])('accepts %s with the bound port', (h) => {
-    expect(allowed(req({ host: `${h}:${PORT}` }))).toBe(true);
-  });
-
-  it.each([
-    '0.0.0.0:4400', '127.1:4400', '2130706433:4400', '0x7f000001:4400', '0177.0.0.1:4400', '127.0.0.01:4400',
-    'localhost.:4400', '127.0.0.1.:4400', 'localhost.evil.com:4400', 'evil.localhost:4400', 'user@localhost:4400',
-    'localhost:4400/path', 'localhost:4400?q', 'localhost:4400#f', 'localhost:4401', 'localhost', '[::1]',
-    '::1:4400', '[0:0:0:0:0:0:0:1]:4400', 'LOCALHOST:4400', 'localhost:04400', 'localhost:4400:4400', 'localhost:',
-    'evil.com', '', `localhost:${CLIENT}`,
-  ])('rejects %j', (h) => {
-    expect(allowed(req({ host: h }))).toBe(false);
-  });
-
-  it('rejects a missing Host', () => expect(reason(req({}))).toBe('missing host header'));
-
-  it('rejects duplicate Hosts (array, folded and raw)', () => {
-    expect(reason(req({ host: ['localhost:4400', 'localhost:4400'] }))).toBe('duplicate host header');
-    expect(reason(req({ host: 'localhost:4400,localhost:4400' }))).toBe('malformed host header');
-    const raw = ['Host', 'localhost:4400', 'host', 'evil.com'];
-    expect(reason(req({ host: 'localhost:4400' }, { rawHeaders: raw }))).toBe('duplicate host header');
-  });
-
-  it('rejects malformed Hosts', () => {
-    expect(reason(req({ host: 'localhost :4400' }))).toBe('malformed host header');
-    expect(reason(req({ host: 'localhost:4400\t' }))).toBe('malformed host header');
-  });
-
-  it('accepts the exact client port only in dev', () => {
-    expect(allowed(req({ host: `localhost:${CLIENT}` }), dev)).toBe(true);
-    expect(allowed(req({ host: `localhost:${PORT}` }), dev)).toBe(true);
-    expect(allowed(req({ host: `localhost:${CLIENT + 1}` }), dev)).toBe(false);
-  });
+const boundary = { port: 4317 };
+const request = (patch: Partial<OfficeRequest> = {}): OfficeRequest => ({
+  method: 'GET', headers: { host: 'localhost:4317' }, url: '/api/state', isUpgrade: false, ...patch,
 });
+const check = (headers: OfficeRequest['headers'], patch: Partial<OfficeRequest> = {}) => officeRequest(request({ headers, ...patch }), boundary);
+const refused = (decision: ReturnType<typeof officeRequest>) => expect(decision).toMatchObject({ allow: false, status: 403, reason: expect.any(String) });
 
-describe('request target', () => {
-  it.each(['http://evil.com/', '//evil.com/', 'evil.com:80', '*'])('rejects %j', (url) => {
-    expect(allowed(req({ host: 'localhost:4400' }, { url }))).toBe(false);
-  });
-});
-
-describe('Fetch Metadata and Origin', () => {
-  const host = `localhost:${PORT}`;
-  const origin = `http://localhost:${PORT}`;
-
-  it('always rejects Sec-Fetch-Site: cross-site, even with an allowed Origin', () => {
-    expect(reason(req({ host, 'sec-fetch-site': 'cross-site' }))).toBe('cross-site request');
-    expect(allowed(req({ host, origin, 'sec-fetch-site': 'cross-site' }))).toBe(false);
-    expect(allowed(req({ host, origin, 'sec-fetch-site': 'cross-site' }, { method: 'POST' }))).toBe(false);
-  });
-
-  it('rejects malformed and duplicate Sec-Fetch-Site', () => {
-    expect(allowed(req({ host, 'sec-fetch-site': 'bogus' }))).toBe(false);
-    expect(allowed(req({ host, 'sec-fetch-site': ['none', 'none'] }))).toBe(false);
-    expect(allowed(req({ host, 'sec-fetch-site': 'none, cross-site' }))).toBe(false);
-  });
-
-  it.each(['GET', 'HEAD', 'get'])('lets safe %s omit Origin with Fetch Metadata absent, none or same-origin', (method) => {
-    expect(allowed(req({ host }, { method }))).toBe(true);
-    expect(allowed(req({ host, 'sec-fetch-site': 'none' }, { method }))).toBe(true);
-    expect(allowed(req({ host, 'sec-fetch-site': 'same-origin' }, { method }))).toBe(true);
-    expect(allowed(req({ host, 'sec-fetch-site': 'same-site' }, { method }))).toBe(false);
-  });
-
-  it.each(['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])('requires an allowed Origin for %s', (method) => {
-    expect(reason(req({ host }, { method }))).toBe(`${method} without origin`);
-    expect(allowed(req({ host, 'sec-fetch-site': 'same-origin' }, { method }))).toBe(false);
-    expect(allowed(req({ host, origin }, { method }))).toBe(true);
-    expect(allowed(req({ host, origin, 'sec-fetch-site': 'same-origin' }, { method }))).toBe(true);
-  });
-
-  it('accepts every exact loopback Origin on an allowed port', () => {
-    for (const o of ['http://127.0.0.1:4400', 'http://localhost:4400', 'http://[::1]:4400']) {
-      expect(allowed(req({ host, origin: o }, { method: 'POST' }))).toBe(true);
+describe('officeRequest', () => {
+  for (const host of ['localhost:4317', '127.0.0.1:4317', '[::1]:4317']) {
+    it(`accepts exact loopback Host ${host}`, () => expect(check({ host })).toEqual({ allow: true }));
+    for (const method of ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+      it(`accepts ${method} with exact loopback Origin ${host}`, () => {
+        expect(check({ host, origin: `http://${host}`, 'sec-fetch-site': 'same-origin' }, { method })).toEqual({ allow: true });
+      });
     }
-    expect(allowed(req({ host, origin: `http://localhost:${CLIENT}` }, { method: 'POST' }), dev)).toBe(true);
+  }
+
+  const badAuthorities = [
+    '0.0.0.0:4317', '127.1:4317', '2130706433:4317', '0177.0.0.1:4317', '0x7f000001:4317',
+    'localhost.:4317', 'localhost.evil:4317', 'evil.localhost:4317', '127.0.0.1.evil:4317',
+    'user@localhost:4317', 'localhost:4317@evil', 'localhost:4317/path', 'localhost:4317?x=1',
+    'localhost:4317#fragment', 'localhost:4318', 'localhost:5317', 'localhost', 'localhost:',
+    'localhost:04317', 'localhost:+4317', 'localhost:4.317e3', 'localhost:65536', 'localhost:0',
+    '::1:4317', '[::ffff:127.0.0.1]:4317', '[::1%lo0]:4317', '[::1]:4318',
+    'LOCALHOST:4317', ' localhost:4317', 'localhost:4317 ', 'localhost:4317\r\nX:1',
+    'localhost:4317,evil:4317', 'http://localhost:4317', '',
+  ];
+  for (const host of badAuthorities) {
+    it(`rejects Host ${JSON.stringify(host)}`, () => refused(check({ host })));
+    it(`rejects Origin authority ${JSON.stringify(host)}`, () => refused(check({ host: 'localhost:4317', origin: `http://${host}` })));
+  }
+  for (const origin of ['null', 'https://localhost:4317', 'ftp://localhost:4317', 'HTTP://localhost:4317', 'http://localhost:4317/', 'http://evil.test:4317', 'http://localhost:4317 http://evil.test', '']) {
+    it(`rejects Origin ${JSON.stringify(origin)}`, () => refused(check({ host: 'localhost:4317', origin })));
+  }
+  it('rejects missing Host', () => refused(check({})));
+  it('accepts mixed-case field names', () => expect(check({ Host: 'localhost:4317', Origin: 'http://localhost:4317' })).toEqual({ allow: true }));
+  for (const name of ['host', 'origin', 'sec-fetch-site']) {
+    const value = name === 'host' ? 'localhost:4317' : name === 'origin' ? 'http://localhost:4317' : 'same-origin';
+    it(`rejects array-valued ${name}`, () => refused(check({ host: 'localhost:4317', [name]: [value] })));
+    it(`rejects case-variant duplicate ${name}`, () => refused(check({ host: 'localhost:4317', [name]: value, [name.toUpperCase()]: value })));
+    it(`rejects duplicates in raw ${name}`, () => {
+      const headers = { host: 'localhost:4317', [name]: value };
+      const rawHeaders = Object.entries(headers).flat().concat([name.toUpperCase(), value]);
+      refused(check(headers, { rawHeaders }));
+    });
+  }
+  it('accepts matching raw headers', () => expect(check({ host: 'localhost:4317' }, { rawHeaders: ['Host', 'localhost:4317', 'Accept', '*/*'] })).toEqual({ allow: true }));
+  for (const rawHeaders of [['Host'], ['Bad Name', 'x'], ['Host', 'evil:4317'], [], ['Host', 'localhost:4317', 'Origin', 'http://localhost:4317']]) {
+    it(`rejects inconsistent/malformed raw headers ${JSON.stringify(rawHeaders)}`, () => refused(check({ host: 'localhost:4317' }, { rawHeaders })));
+  }
+
+  for (const method of ['GET', 'HEAD']) {
+    for (const site of [undefined, 'none', 'same-origin']) {
+      it(`accepts originless ${method} with Fetch Metadata ${site}`, () => expect(check({ host: 'localhost:4317', 'sec-fetch-site': site }, { method })).toEqual({ allow: true }));
+    }
+  }
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT']) {
+    it(`rejects originless ${method}`, () => refused(check({ host: 'localhost:4317' }, { method })));
+  }
+  for (const origin of [undefined, 'http://localhost:4317']) {
+    it(`rejects cross-site metadata despite Origin ${origin}`, () => refused(check({ host: 'localhost:4317', origin, 'sec-fetch-site': 'cross-site' })));
+  }
+  it('requires Origin with same-site metadata', () => refused(check({ host: 'localhost:4317', 'sec-fetch-site': 'same-site' })));
+  it('accepts same-site only with an allowed Origin', () => expect(check({ host: 'localhost:4317', origin: 'http://127.0.0.1:4317', 'sec-fetch-site': 'same-site' })).toEqual({ allow: true }));
+  for (const site of ['', 'Same-Origin', 'same-origin, none', 'same-origin\n', 'unknown']) {
+    it(`rejects malformed metadata ${JSON.stringify(site)}`, () => refused(check({ host: 'localhost:4317', origin: 'http://localhost:4317', 'sec-fetch-site': site })));
+  }
+
+  it('allows explicit development client Host and Origin', () => {
+    expect(officeRequest(request({ headers: { host: 'localhost:5317', origin: 'http://localhost:5317' }, method: 'POST' }), { port: 4317, dev: true, clientPort: 5317 })).toEqual({ allow: true });
   });
-
-  it.each([
-    'null', 'http://evil.com', 'https://localhost:4400', 'http://localhost:4400/', 'http://localhost:4401',
-    'http://localhost', 'http://0.0.0.0:4400', 'http://127.1:4400', 'http://localhost.:4400',
-    'http://user@localhost:4400', 'http://localhost:4400.evil.com', 'http://localhost:4400?x', 'localhost:4400',
-    `http://localhost:${CLIENT}`, '',
-  ])('rejects Origin %j', (o) => {
-    expect(allowed(req({ host, origin: o }, { method: 'POST' }))).toBe(false);
-    expect(allowed(req({ host, origin: o }))).toBe(false);
+  it('allows the client Origin behind a backend proxy', () => {
+    expect(officeRequest(request({ headers: { host: '127.0.0.1:4317', origin: 'http://localhost:5317' } }), { port: 4317, dev: true, clientPort: 5317 })).toEqual({ allow: true });
   });
+  it('does not enable the client port in production', () => refused(officeRequest(request({ headers: { host: 'localhost:4317', origin: 'http://localhost:5317' } }), { port: 4317, clientPort: 5317 })));
+  for (const port of [0, -1, 65536, 4317.1, NaN, Infinity]) {
+    it(`rejects invalid server port ${port}`, () => refused(officeRequest(request(), { port })));
+    it(`rejects invalid dev client port ${port}`, () => refused(officeRequest(request(), { port: 4317, dev: true, clientPort: port })));
+  }
+  it('requires explicit dev client port', () => refused(officeRequest(request(), { port: 4317, dev: true })));
+  it('uses the actual configured port', () => expect(officeRequest(request({ headers: { host: 'localhost:12345' } }), { port: 12345 })).toEqual({ allow: true }));
 
-  it('rejects duplicate and malformed Origins', () => {
-    expect(reason(req({ host, origin: [origin, origin] }, { method: 'POST' }))).toBe('duplicate origin header');
-    expect(reason(req({ host, origin: `${origin}, http://evil.com` }, { method: 'POST' }))).toBe('malformed origin header');
-    const raw = ['Host', host, 'Origin', origin, 'Origin', 'http://evil.com'];
-    expect(reason(req({ host, origin }, { method: 'POST', rawHeaders: raw }))).toBe('duplicate origin header');
+  for (const url of ['/ws', '/ws/term']) {
+    it(`accepts browser upgrade ${url} with trusted Origin`, () => expect(check({ host: 'localhost:4317', origin: 'http://localhost:4317' }, { isUpgrade: true, url })).toEqual({ allow: true }));
+    it(`rejects originless upgrade ${url}`, () => refused(check({ host: 'localhost:4317' }, { isUpgrade: true, url })));
+  }
+  it('rejects non-GET upgrades', () => refused(check({ host: 'localhost:4317', origin: 'http://localhost:4317' }, { isUpgrade: true, method: 'POST' })));
+  for (const url of ['', 'http://localhost:4317/api/state', '//evil/api/state', '/\\evil', '/api/state#x', '/api/\nstate', '/api state']) {
+    it(`rejects malformed request target ${JSON.stringify(url)}`, () => refused(check({ host: 'localhost:4317' }, { url })));
+  }
+  it('accepts paths and queries without interpreting encoded contents', () => expect(check({ host: 'localhost:4317' }, { url: '/api/a%20b?next=https%3A%2F%2Fexample.com' })).toEqual({ allow: true }));
+  for (const method of ['', 'get', 'POST\r\n', 'GET POST']) {
+    it(`rejects malformed method ${JSON.stringify(method)}`, () => refused(check({ host: 'localhost:4317' }, { method })));
+  }
+  it('does not provide originless unsafe token exceptions', () => {
+    for (const url of ['/api/hooks/token', '/api/mcp/token']) refused(check({ host: 'localhost:4317' }, { method: 'POST', url }));
   });
-});
-
-describe('websocket upgrades', () => {
-  const host = `localhost:${PORT}`;
-  const ws = (headers: BoundaryHeaders) => req(headers, { url: '/ws', isUpgrade: true });
-
-  it('needs an allowed Origin', () => {
-    expect(allowed(ws({ host, origin: `http://localhost:${PORT}` }))).toBe(true);
-    expect(reason(ws({ host }))).toBe('websocket upgrade without origin');
-    expect(allowed(ws({ host, origin: 'http://evil.com' }))).toBe(false);
-    expect(allowed(ws({ host: 'evil.com', origin: `http://localhost:${PORT}` }))).toBe(false);
-  });
-
-  it('accepts the dev client origin only in dev', () => {
-    const r = ws({ host, origin: `http://localhost:${CLIENT}` });
-    expect(allowed(r, dev)).toBe(true);
-    expect(allowed(r, prod)).toBe(false);
-  });
-});
-
-it('answers 403 with a reason', () => {
-  expect(checkRequest(req({ host: 'evil.com' }), prod)).toEqual({ allow: false, status: 403, reason: 'host not allowed' });
 });

@@ -10,7 +10,8 @@ import { DAY_PARTS } from '../shared/speech.ts';
 import { DEMO, DEMO_SCALE, PORT, STATE_FILE, VERSION, WORKSPACE_ROOT } from './config.ts';
 import { MACHINES_DIR } from './workspace.ts';
 import { realBackend } from './backend.ts';
-import { handleHook, handleMcp, setOfficeUrl } from './cliRunner.ts';
+import { handleHook, handleMcp, hasCliRoute, setOfficeUrl } from './cliRunner.ts';
+import { officeRequest } from './requestBoundary.ts';
 import { createDemoBackend } from './demo.ts';
 import { parseRange } from './journal.ts';
 import { underLauncher } from './officeUpdate.ts';
@@ -28,8 +29,46 @@ if (PORT) setOfficeUrl(`http://127.0.0.1:${PORT}`);
 await swarm.init();
 
 const app = express();
+// The source entry is used by the Vite launcher; the bundled production entry has no client-port exception.
+const dev = /[/\\]server[/\\]index\.ts$/.test(process.argv[1] ?? '');
+const clientPort = Number(process.env.SWARM_CLIENT_PORT || 5317);
+app.use((req, res, next) => {
+  const url = req.originalUrl;
+  const callback = /^\/api\/(hooks|mcp)\/([A-Za-z0-9_-]{1,128})$/.exec(url);
+  // Recognize reserved callback look-alikes only to refuse them, never to authorize them.
+  let callbackPath: string;
+  try {
+    callbackPath = decodeURIComponent(url.split('?')[0]).replace(/[\\/]+/g, '/');
+  } catch {
+    res.status(403).json({ error: 'malformed-target' });
+    return;
+  }
+  if (/^\/api\/(hooks|mcp)/i.test(callbackPath)) {
+    if (!callback || !hasCliRoute(callback[2], callback[1] as 'hooks' | 'mcp')) {
+      res.status(403).json({ error: 'invalid-callback' });
+      return;
+    }
+  }
+  const decision = officeRequest({
+    // Only verified, exact POST callbacks may omit Origin. Keep all Host/metadata checks intact.
+    method: callback && req.method === 'POST' && req.headers.origin === undefined ? 'GET' : req.method,
+    headers: req.headers,
+    rawHeaders: req.rawHeaders,
+    url,
+    isUpgrade: false,
+  }, { port: req.socket.localPort ?? PORT, dev, clientPort });
+  if (!decision.allow) {
+    res.status(decision.status).json({ error: decision.reason });
+    return;
+  }
+  if (callback && req.method !== 'POST') {
+    res.status(405).set('Allow', 'POST').end();
+    return;
+  }
+  next();
+});
 // Agent CLIs calling back: hooks (a tool result can be a large screenshot, hence the limit) and the CEO's office tools.
-// The token in the path is the session's; unknown tokens get an empty answer.
+// The token in the path is the session's, verified above before any JSON parser runs.
 app.post('/api/hooks/:token', express.json({ limit: '64mb' }), (req, res) => void res.json(handleHook(String(req.params.token), req.body)));
 app.post('/api/mcp/:token', express.json({ limit: '4mb' }), (req, res, next) => void handleMcp(String(req.params.token), req, res).catch(next));
 app.all('/api/mcp/:token', (_req, res) => void res.status(405).set('Allow', 'POST').end());
@@ -313,7 +352,7 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   res.status(status).json({ error: message });
 });
 
-const server = http.createServer(app);
+export const server = http.createServer(app);
 // Two sockets: /ws carries the office's state to every tab, /ws/term?agent=<id> one agent's terminal to whoever opened it.
 const wss = new WebSocketServer({ noServer: true });
 const terms = new WebSocketServer({ noServer: true });
