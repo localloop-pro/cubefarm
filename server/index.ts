@@ -362,6 +362,19 @@ wss.on('connection', (ws) => {
 });
 terms.on('connection', (ws, req) => swarm.attachTerminal(new URL(req.url ?? '', 'http://localhost').searchParams.get('agent') ?? '', ws));
 server.on('upgrade', (req, socket, head) => {
+  // Same browser boundary as HTTP, before routing: a refused handshake never reaches either ws server.
+  const decision = officeRequest({
+    method: req.method ?? '',
+    headers: req.headers,
+    rawHeaders: req.rawHeaders,
+    url: req.url ?? '',
+    isUpgrade: true,
+  }, { port: req.socket.localPort ?? PORT, dev, clientPort });
+  if (!decision.allow) {
+    socket.once('finish', () => socket.destroy());
+    socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    return;
+  }
   const { pathname } = new URL(req.url ?? '', 'http://localhost');
   const target = pathname === '/ws' ? wss : pathname === '/ws/term' ? terms : null;
   if (!target) return void socket.destroy();
