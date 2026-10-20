@@ -210,5 +210,4 @@ Client (`client/`, Vite root; React 19, R3F, drei, zustand):
   changing, and don't touch unrelated files.
 - Before opening it: `typecheck`, `test` and `build`. `test:e2e` only when an issue asks for it; CI doesn't run it.
 - Say how you verified it and list your assumptions. UI changes get screenshots from the demo office.
-- For UI changes, follow [the before/after evidence guide](docs/visual-evidence.md): compare the same state and viewport, protect private data, and label any missing or inconclusive evidence. The office's QA screenshot upload remains the default.
 - Never push to `main`, never force-push, never merge your own PR.
