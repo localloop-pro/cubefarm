@@ -107,7 +107,10 @@ export function mergeGate(rec: GateRecord, pr: GatePull): GateDecision {
   if (pr.state !== 'OPEN') return { allow: false, reason: 'not-open', detail: String(pr.state ?? 'unknown') };
   if (pr.isDraft !== false) return { allow: false, reason: 'draft' };
   if (pr.checks !== 'passing') return { allow: false, reason: 'checks-not-passing', detail: pr.checks };
-  if (pr.reviewDecision === 'CHANGES_REQUESTED') return { allow: false, reason: 'changes-requested' };
+  // null is GitHub's "no review decision"; undefined means the caller didn't fetch it, so it refuses
+  if (pr.reviewDecision === undefined || pr.reviewDecision === 'CHANGES_REQUESTED') {
+    return { allow: false, reason: 'changes-requested', detail: pr.reviewDecision ?? 'unknown' };
+  }
   if (pr.mergeState !== 'CLEAN') return { allow: false, reason: 'merge-state', detail: pr.mergeState || 'unknown' };
   return { allow: true, sha: rec.passedSha };
 }

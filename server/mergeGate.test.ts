@@ -270,6 +270,7 @@ describe('mergeGate', () => {
 
   it('refuses requested changes', () => {
     expect(reason(rec(), pr({ reviewDecision: 'CHANGES_REQUESTED' }))).toBe('changes-requested');
+    expect(reason(rec(), pr({ reviewDecision: undefined }))).toBe('changes-requested');
   });
 
   it('refuses any merge state but CLEAN', () => {
