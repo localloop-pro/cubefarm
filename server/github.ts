@@ -76,8 +76,12 @@ const failed = (c: Check) => BAD.includes(c.conclusion ?? '') || BAD.includes(c.
 const pending = (c: Check) => (!!c.status && c.status !== 'COMPLETED') || c.state === 'PENDING' || c.state === 'EXPECTED';
 const checkName = (c: Check) => c.name || c.context || 'check';
 
-function checksOf(rollup: RawPull['statusCheckRollup']): PullInfo['checks'] {
-  if (!rollup || rollup.length === 0) return 'none';
+const QUIET = ['NEUTRAL', 'SKIPPED'];
+const quiet = (c: Check) => QUIET.includes(c.conclusion ?? '') || QUIET.includes(c.state ?? '');
+
+/** Rolls checks up to one status; no checks, or only neutral/skipped ones, is `none`, never `passing`. */
+export function checksOf(rollup: RawPull['statusCheckRollup']): PullInfo['checks'] {
+  if (!rollup || rollup.length === 0 || rollup.every(quiet)) return 'none';
   if (rollup.some(failed)) return 'failing';
   if (rollup.some(pending)) return 'pending';
   return 'passing';
@@ -195,6 +199,9 @@ export interface PrDetails {
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   mergeable: string;
   mergeState: string;
+  isDraft?: boolean;
+  reviewDecision?: string | null;
+  checks?: PullInfo['checks'];
 }
 
 export async function prDetails(fullName: string, number: number): Promise<PrDetails> {
@@ -210,7 +217,13 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     state: PrDetails['state'];
     mergeable: string;
     mergeStateStatus: string;
-  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,body,url,headRefName,headRefOid,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus']);
+    isDraft: boolean;
+    reviewDecision: string | null;
+    statusCheckRollup: RawPull['statusCheckRollup'];
+  }>([
+    'pr', 'view', String(number), '-R', fullName, '--json',
+    'number,title,body,url,headRefName,headRefOid,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus,isDraft,reviewDecision,statusCheckRollup',
+  ]);
   return {
     number: raw.number,
     title: raw.title,
@@ -223,6 +236,9 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     state: raw.state,
     mergeable: raw.mergeable,
     mergeState: raw.mergeStateStatus || 'UNKNOWN',
+    isDraft: raw.isDraft,
+    reviewDecision: raw.reviewDecision || null,
+    checks: checksOf(raw.statusCheckRollup),
   };
 }
 
