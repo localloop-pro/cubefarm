@@ -2,12 +2,12 @@ import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
 import express, { type NextFunction, type Request, type Response } from 'express';
-import type { AddressInfo } from 'node:net';
+import type { AddressInfo, Socket } from 'node:net';
 import { WebSocketServer } from 'ws';
 import { z } from 'zod';
 import { CLIP_MAX_BYTES, CLIP_TOO_BIG } from '../shared/clipLimits.ts';
 import { DAY_PARTS } from '../shared/speech.ts';
-import { DEMO, DEMO_SCALE, PORT, STATE_FILE, VERSION, WORKSPACE_ROOT } from './config.ts';
+import { DEMO, DEMO_SCALE, HOST, PORT, STATE_FILE, VERSION, WORKSPACE_ROOT, isLoopback, localAddress, networkUrls } from './config.ts';
 import { MACHINES_DIR } from './workspace.ts';
 import { realBackend } from './backend.ts';
 import { handleHook, handleMcp, hasCliRoute, setOfficeUrl } from './cliRunner.ts';
@@ -18,6 +18,7 @@ import { underLauncher } from './officeUpdate.ts';
 import { serviceWorkerSource, swVersion } from './pwa.ts';
 import { screenStatus } from './screenReply.ts';
 import { parseSendBackNote } from './sendBack.ts';
+import { handleGateway, upgradeGateway } from './previewGateway.ts';
 import { PresenceHub } from './presence.ts';
 import { HttpError, Swarm } from './swarm.ts';
 
@@ -25,7 +26,7 @@ const swarm = new Swarm(DEMO ? createDemoBackend(DEMO_SCALE) : realBackend);
 // Who else is in the 3D office (shared presence): relayed between tabs over /ws, never saved. The demo adds fake visitors.
 const presence = new PresenceHub({ demo: DEMO });
 // Sessions the office picks back up while it starts need the address their CLIs call back on before it listens.
-if (PORT) setOfficeUrl(`http://127.0.0.1:${PORT}`);
+if (PORT) setOfficeUrl(`http://${localAddress(HOST)}:${PORT}`);
 await swarm.init();
 
 const app = express();
@@ -67,6 +68,10 @@ app.use((req, res, next) => {
   }
   next();
 });
+// Previews through the office's own address, for browsers on other devices (server/previewGateway.ts). First: their
+// request bodies pass on untouched.
+const proxied = (port: number) => swarm.previewProxied(port);
+app.use((req, res, next) => void (handleGateway(req, res, proxied) || next()));
 // Agent CLIs calling back: hooks (a tool result can be a large screenshot, hence the limit) and the CEO's office tools.
 // The token in the path is the session's, verified above before any JSON parser runs.
 app.post('/api/hooks/:token', express.json({ limit: '64mb' }), (req, res) => void res.json(handleHook(String(req.params.token), req.body)));
@@ -202,6 +207,8 @@ app.post(
     swarm.hireAgent(repoId(req), {
       name: str(req.body.name),
       cli: str(req.body.cli),
+      host: str(req.body.host),
+      strict: true,
       model: str(req.body.model),
       effort: str(req.body.effort),
       look: str(req.body.look),
@@ -215,6 +222,7 @@ app.post('/api/agents/:id/assign', route((req) => swarm.assign(String(req.params
 app.post('/api/agents/:id/stop', route((req) => swarm.stopAgent(String(req.params.id))));
 app.post('/api/agents/:id/reset', route((req) => swarm.resetAgent(String(req.params.id))));
 app.post('/api/agents/:id/message', route((req) => swarm.message(String(req.params.id), str(req.body.text))));
+app.post('/api/agents/:id/sign-in', route((req) => swarm.signIn(String(req.params.id))));
 app.get('/api/agents/:id/prompt', route((req) => swarm.agentPrompt(String(req.params.id))));
 app.get('/api/agents/:id/screen', (req, res) => {
   const shot = swarm.screenshot(String(req.params.id));
@@ -239,6 +247,18 @@ const sendAudio = (res: Response, audio: Buffer, cache = 'private, max-age=3600'
   res.end(audio);
 };
 app.put('/api/voice/key', route((req) => swarm.voice.setKey(parse(z.object({ key: z.string().max(400) }), req.body).key)));
+// Settings → Cloud agents (docs/cloud.md): keys and tokens go in, never come back out.
+app.put('/api/cloud/key', route((req) => swarm.setCloudKey(parse(z.object({ key: z.string().max(400) }), req.body).key)));
+app.put(
+  '/api/cloud/token',
+  route((req) => {
+    const body = parse(z.object({ kind: z.enum(['github', 'anthropic', 'openai']), value: z.string().max(400) }), req.body);
+    return swarm.setCloudToken(body.kind, body.value);
+  }),
+);
+app.post('/api/cloud/test', route(() => swarm.testCloud()));
+app.post('/api/cloud/orphans', route(() => swarm.deleteCloudOrphans()));
+app.post('/api/cloud/demo-expire', route(() => swarm.expireSignIns()));
 app.get('/api/voice/voices', route(() => swarm.voice.voices()));
 app.get(
   '/api/voice/messages/:id',
@@ -314,6 +334,7 @@ app.post(
       cli: typeof req.body?.cli === 'string' ? req.body.cli : undefined,
       model: typeof req.body?.model === 'string' ? req.body.model : undefined,
       effort: typeof req.body?.effort === 'string' ? req.body.effort : undefined,
+      host: typeof req.body?.host === 'string' ? req.body.host : undefined,
       note: str(req.body?.note),
     }),
   ),
@@ -364,14 +385,21 @@ terms.on('connection', (ws, req) => swarm.attachTerminal(new URL(req.url ?? '', 
 server.on('upgrade', (req, socket, head) => {
   const { pathname } = new URL(req.url ?? '', 'http://localhost');
   const target = pathname === '/ws' ? wss : pathname === '/ws/term' ? terms : null;
+  if (!target && upgradeGateway(req, socket as Socket, head, proxied)) return;
   if (!target) return void socket.destroy();
   target.handleUpgrade(req, socket, head, (ws) => target.emit('connection', ws, req));
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  setOfficeUrl(`http://127.0.0.1:${(server.address() as AddressInfo).port}`);
+server.listen(PORT, HOST, () => {
+  const port = (server.address() as AddressInfo).port;
+  setOfficeUrl(`http://${localAddress(HOST)}:${port}`);
   const scale = DEMO_SCALE ? `, ${DEMO_SCALE.floors} floors × ${DEMO_SCALE.agents} people` : '';
-  console.log(`\n  🏢 cubefarm ${VERSION} on http://localhost:${PORT}${DEMO ? `  (DEMO MODE: fake GitHub + fake agents${scale})` : ''}`);
+  const shown = localAddress(HOST) === '127.0.0.1' ? 'localhost' : localAddress(HOST);
+  console.log(`\n  🏢 cubefarm ${VERSION} on http://${shown}:${PORT}${DEMO ? `  (DEMO MODE: fake GitHub + fake agents${scale})` : ''}`);
+  if (!isLoopback(HOST)) {
+    for (const url of networkUrls(HOST, port)) console.log(`     on your network: ${url}`);
+    console.log(`     ⚠ listening on ${HOST}: anyone who can reach this machine can use the office and its agents, with no sign-in`);
+  }
   console.log(`     state: ${STATE_FILE}`);
   console.log(`     workspaces: ${WORKSPACE_ROOT}`);
   console.log(`     agents' machines: ${DEMO ? '(pretend ones, in the demo)' : MACHINES_DIR}\n`);

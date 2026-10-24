@@ -1,9 +1,10 @@
 import { create } from 'zustand';
-import { CEO_ID, DEFAULT_DOG_NAME, DEFAULT_MAX_AGENTS, type AgentView, type CeoInfo, type CliView, type DoctorFinding, type HireRequestView, type LogLine, type NotifyChannelsView, type OfficeUpdateView, type OpsView, type PhoneMessage, type PongRow, type PrPreviewView, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TickerItem, type UsageView, type VisitorView, type VoiceCacheView, type WorldSnapshot } from '../../shared/types';
+import { CEO_ID, DEFAULT_DOG_NAME, DEFAULT_MAX_AGENTS, type AgentView, type CeoInfo, type CliView, type CloudView, type DoctorFinding, type HireRequestView, type LogLine, type NotifyChannelsView, type OfficeUpdateView, type OpsView, type PhoneMessage, type PongRow, type PrPreviewView, type QaView, type RepoView, type ServerEvent, type SwarmSettings, type TickerItem, type UsageView, type VisitorView, type VoiceCacheView, type WorldSnapshot } from '../../shared/types';
 import { blockers } from '../../shared/issues';
 import { latestListed } from '../../shared/watch';
 import { DEFAULT_WEATHER, DEFAULT_WORLD_EVENTS, EMPTY_WEATHER_VIEW, type WeatherView } from '../../shared/outside';
 import { DEFAULT_NOTIFY } from '../../shared/notify';
+import { DEFAULT_CLOUD, EMPTY_CLOUD } from '../../shared/cloud';
 import { speechText } from '../../shared/speech';
 import { showDesktopNote } from './notifications';
 import { EMPTY_OPS, newAlarms } from './ops';
@@ -18,6 +19,7 @@ import { takeEmote, takePing, takePose, takeRoster } from './world/presence/pres
 import { gongForMerge } from './world/gongRunner';
 import { ROOF } from './world/layout';
 import { emitReward } from './world/decor/rewards';
+import type { SnackId } from './world/fridge';
 
 export type Agent = Omit<AgentView, 'log'>;
 
@@ -55,6 +57,8 @@ export interface Focus {
     | { kind: 'pickup'; toyId: string }
     | { kind: 'poke'; toyId: string }
     | { kind: 'coffee'; op: 'place' | 'brew' | 'take' }
+    /** The kitchenette fridge (fridgeState.ts): open or close its door, grab a snack, or read the label on someone's lunch. */
+    | { kind: 'fridge'; op: 'door' | 'take' | 'lunch'; snack?: SnackId }
     | { kind: 'jukebox'; op: 'next' | 'toggle' | 'station' | 'vol+' | 'vol-' }
     | { kind: 'channel'; repoId: string; pr: number | null }
     | { kind: 'resume' }
@@ -80,6 +84,8 @@ export type Held =
   | { kind: 'sticky'; id: string; repoId: string; key: string; number: number; pr: boolean }
   /** A sausage in a bun off the roof's grill: bites left, eaten like coffee is sipped. */
   | { kind: 'sausage'; id: string; bites: number; charred: boolean }
+  /** Something from the kitchenette fridge (fridge.ts): sips or bites left, had like coffee or a sausage. */
+  | { kind: 'snack'; id: string; snack: SnackId; left: number }
   /** A decoration on its way to a slot (#210): from the floor's decor box (from null) or from the slot it stood in. */
   | { kind: 'decor'; id: string; item: DecorItem; from: string | null }
   /** A ping-pong paddle, playing at that end of the table (toys/pongState.ts): mouse and camera belong to the match. */
@@ -127,6 +133,7 @@ interface State {
   weather: WeatherView; // the real local weather's place and latest reading (Settings → Weather)
   ticker: TickerItem[]; // the floors' recent activity lines, oldest first (world/ActivityTicker.tsx)
   notifyChannels: NotifyChannelsView; // which chat apps have a webhook saved (hints only) and how many devices get push
+  cloud: CloudView; // Settings → Cloud agents: the Upstash account and what cloud agents sign in with (never a key)
   pong: Record<string, PongRow[]>; // each floor's ping-pong leaderboard by repo id, best first
   restarting: boolean; // the connection dropped because the office is restarting to update
   visitors: VisitorView[]; // everyone else appearing in the office, any floor (presence; their poses skip the store)
@@ -228,6 +235,7 @@ export const useStore = create<State>((set, get) => ({
     worldEvents: DEFAULT_WORLD_EVENTS,
     listen: { provider: 'off', autoSend: false, handsFree: false },
     notify: DEFAULT_NOTIFY,
+    cloud: DEFAULT_CLOUD,
   },
   clis: [],
   repos: [],
@@ -253,6 +261,7 @@ export const useStore = create<State>((set, get) => ({
   weather: EMPTY_WEATHER_VIEW,
   ticker: [],
   notifyChannels: { webhooks: { ntfy: { set: false, hint: '' } }, pushDevices: 0 },
+  cloud: EMPTY_CLOUD,
   pong: {},
   restarting: false,
   visitors: [],
@@ -322,6 +331,7 @@ export const useStore = create<State>((set, get) => ({
           weather: d.weather ?? EMPTY_WEATHER_VIEW,
           ticker: d.ticker ?? [],
           notifyChannels: d.notifyChannels ?? get().notifyChannels,
+          cloud: d.cloud ?? EMPTY_CLOUD,
           progress: d.progress ?? { floors: {}, achievements: [], coffees: 0, merges: 0 },
           pong: d.pong ?? {},
           restarting: false,
@@ -506,6 +516,9 @@ export const useStore = create<State>((set, get) => ({
         break;
       case 'notifyChannels':
         set({ notifyChannels: ev.notifyChannels });
+        break;
+      case 'cloud':
+        set({ cloud: ev.cloud });
         break;
       case 'notify':
         // This tab shows it only while it's hidden (notifications.ts); a visible office already chimes and toasts.

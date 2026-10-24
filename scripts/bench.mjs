@@ -2,13 +2,15 @@
 // The scale benchmark (#228): boots a demo office headless (the big company by default, 10 floors of 15 people),
 // visits the lobby and three floors, and writes what each costs to a JSON report: frame rate, frame-time p95, draw
 // calls, triangles, JS heap, live audio nodes and websocket traffic. Run `npm run build` first. `--help` for options.
+// `--route <seconds>` walks around each floor instead of standing still (the board, the coffee corner, the windows,
+// desks, back and forth, with world events going off) and reports the hitches the office recorded (#294).
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { chromium } from '@playwright/test';
-import { cpuStats, eventType, floorsToVisit, frameStats, median, medianRun, parseReadout, portProblem, wsStats } from './benchSteps.mjs';
+import { cpuStats, eventType, floorsToVisit, frameStats, median, medianRun, parseReadout, portProblem, routeTour, wsStats, yawTo } from './benchSteps.mjs';
 
 const HELP = `
   node scripts/bench.mjs [options]       (after npm run build)
@@ -21,11 +23,16 @@ const HELP = `
     --seconds <n>               measuring time per visit (default 10), after --warmup <n> (default 6)
     --settle <n>                seconds the office works before the first visit (default 20)
     --runs <n>                  visits per floor; the report keeps every run and their medians (default 1)
+    --route <seconds>           walk a route around the floor for this long instead of standing still (e.g. 180):
+                                the measuring time is the route's, and the report lists the hitches recorded
     --gpu                       the real GPU (ANGLE d3d11 / metal / gl) instead of SwiftShader; --angle <name> picks one
     --size 1280x720             the browser's viewport
+    --scale <n>                 the screen's pixel ratio (default 1; 1.5 or 2 to let the adaptive resolution work)
+    --throttle <n>              slow the page's CPU down n times (Chrome's CPU throttling), like a slower machine
     --gfx low|medium|high|auto  the graphics preset to measure with, where the office has one
     --visitors <n>              the demo's fake visitors walking about the floor you're on (shared presence)
     --browser <path>            a Chromium to use instead of Playwright's (or BENCH_CHROMIUM)
+    --profile                   record a CPU profile of each measured window (.cpuprofile beside the report)
     --label <text>              a name for this run, kept in the report ("before", "after")
     --out <file>                where the JSON report goes (default a file in the temp folder)
 `;
@@ -42,13 +49,17 @@ const { values } = parseArgs({
     warmup: { type: 'string', default: '6' },
     settle: { type: 'string', default: '20' },
     runs: { type: 'string', default: '1' },
+    route: { type: 'string', default: '0' },
     gpu: { type: 'boolean' },
     angle: { type: 'string' },
     size: { type: 'string', default: '1280x720' },
+    scale: { type: 'string', default: '1' },
+    throttle: { type: 'string', default: '1' },
     gfx: { type: 'string' },
     visitors: { type: 'string', default: '0' },
     browser: { type: 'string', default: process.env.BENCH_CHROMIUM },
     label: { type: 'string', default: '' },
+    profile: { type: 'boolean' },
     out: { type: 'string' },
     help: { type: 'boolean', short: 'h' },
   },
@@ -62,7 +73,8 @@ const root = path.resolve(import.meta.dirname, '..');
 const num = (v) => Number(v);
 const [width, height] = values.size.split('x').map(num);
 const angle = values.angle ?? (values.gpu ? (process.platform === 'win32' ? 'd3d11' : process.platform === 'darwin' ? 'metal' : 'gl') : 'swiftshader');
-const seconds = num(values.seconds);
+const route = num(values.route);
+const seconds = route > 0 ? route : num(values.seconds);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const git = (...args) => spawnSync('git', args, { cwd: root, encoding: 'utf8', windowsHide: true }).stdout?.trim() ?? '';
 
@@ -125,8 +137,57 @@ async function enterOffice(page) {
   await page.evaluate(() => [...document.querySelectorAll('button')].find((b) => /skip tour/i.test(b.textContent ?? ''))?.click());
 }
 
+/**
+ * Walks the player around the floor for `ms`: along the floor's own paths from spot to spot (the board, the coffee
+ * corner, the windows, desks...), there and back, running every other leg, and sets world events off on the way.
+ */
+async function walkRoute(page, ms) {
+  const end = Date.now() + ms;
+  const spots = await page.evaluate(() => window.__swarmPlayer?.spots() ?? []);
+  const tour = routeTour(spots);
+  if (!tour.length) return { legs: 0, skipped: 0 };
+  const at = () => page.evaluate(() => window.__swarmPlayer?.at ?? null);
+  const events = ['plane', 'balloon', 'birds', 'fireworks', 'blimp', 'helicopter'];
+  let legs = 0;
+  let skipped = 0;
+  await page.keyboard.down('KeyW');
+  try {
+    for (let i = 0; Date.now() < end; i++) {
+      const target = tour[i % tour.length];
+      if (i % 4 === 2) await page.evaluate((id) => window.__swarmEvents?.trigger?.(id), events[(i >> 2) % events.length]).catch(() => undefined);
+      const run = i % 2 === 1;
+      if (run) await page.keyboard.down('ShiftLeft');
+      const path = (await page.evaluate(([x, z]) => window.__swarmPlayer?.path(x, z) ?? null, [target.x, target.z])) ?? [];
+      for (const wp of path) {
+        let best = Infinity;
+        let since = Date.now();
+        while (Date.now() < end) {
+          const p = await at();
+          if (!p) break;
+          const d = Math.hypot(wp.x - p.x, wp.z - p.z);
+          if (d < 0.35) break;
+          if (d < best - 0.05) {
+            best = d;
+            since = Date.now();
+          } else if (Date.now() - since > 2500) {
+            skipped++; // caught on something: on to the next point
+            break;
+          }
+          await page.evaluate((yaw) => window.__swarmPlayer?.face(yaw), yawTo(p, wp));
+          await sleep(60);
+        }
+      }
+      if (run) await page.keyboard.up('ShiftLeft');
+      legs++;
+    }
+  } finally {
+    await page.keyboard.up('KeyW');
+  }
+  return { legs, skipped };
+}
+
 async function visit(browser, floor) {
-  const context = await browser.newContext({ viewport: { width, height } });
+  const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: num(values.scale) });
   const page = await context.newPage();
   // Where the elevator lets you out, looking into the floor over the desks.
   const view = JSON.stringify({ floor, x: 0, z: 10.4, yaw: 0, pitch: -0.12 });
@@ -139,6 +200,7 @@ async function visit(browser, floor) {
   page.on('pageerror', (e) => errors.push(`page error: ${e.message.slice(0, 300)}`));
 
   const cdp = await context.newCDPSession(page);
+  if (num(values.throttle) > 1) await cdp.send('Emulation.setCPUThrottlingRate', { rate: num(values.throttle) });
   let audioNodes = 0;
   const audio = await cdp.send('WebAudio.enable').then(
     () => true,
@@ -173,7 +235,12 @@ async function visit(browser, floor) {
   await cdp.send('Performance.enable').catch(() => undefined);
   const metrics = async () => Object.fromEntries(((await cdp.send('Performance.getMetrics').catch(() => null))?.metrics ?? []).map((m) => [m.name, m.value]));
   const before = await metrics();
+  const gpuBefore = await page.evaluate(() => {
+    window.__swarmHitches?.clear();
+    return { ...window.__swarmHitches?.gl, decisions: window.__swarmGfx?.decisions.length ?? 0 };
+  });
   recording = true;
+  if (values.profile) await cdp.send('Profiler.enable').then(() => cdp.send('Profiler.start')).catch(() => undefined);
   await page.evaluate(() => {
     const b = { stamps: [], readouts: [], stop: false, timer: 0 };
     window.__bench = b;
@@ -186,7 +253,21 @@ async function visit(browser, floor) {
     const numbers = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => typeof v === 'number'));
     b.timer = setInterval(() => b.readouts.push(window.__swarmStats ? numbers(window.__swarmStats) : (document.querySelector('.stats span')?.textContent ?? null)), 500);
   });
-  await sleep(seconds * 1000);
+  const walked = route > 0 ? await walkRoute(page, seconds * 1000) : null;
+  if (!walked) await sleep(seconds * 1000);
+  const hitches = await page.evaluate((from) => {
+    const h = window.__swarmHitches;
+    if (!h) return null;
+    return {
+      ...h.summary,
+      worst: h.worst ? { ms: h.worst.ms, cause: h.worst.cause } : null,
+      list: h.list.map((x) => ({ kind: x.kind, ms: x.ms, cause: x.cause, detail: x.detail, gfx: x.gfx, dpr: x.dpr, programs: x.programs, uploads: x.uploads, scripts: x.scripts })),
+      programsLinked: h.gl.compiles - (from.compiles ?? 0),
+      textureUploads: h.gl.uploads - (from.uploads ?? 0),
+      dprSteps: h.notes.filter((n) => n.kind === 'dpr').length,
+      gfxChanges: (window.__swarmGfx?.decisions.length ?? 0) - from.decisions,
+    };
+  }, gpuBefore);
   const data = await page.evaluate(() => {
     const b = window.__bench;
     b.stop = true;
@@ -195,6 +276,8 @@ async function visit(browser, floor) {
   });
   recording = false;
   const after = await metrics();
+  const profile = values.profile ? await cdp.send('Profiler.stop').then((r) => r.profile).catch(() => null) : null;
+  if (profile) fs.writeFileSync(`${out.replace(/\.json$/, '')}-floor${floor}.cpuprofile`, JSON.stringify(profile));
 
   await cdp.send('HeapProfiler.collectGarbage').catch(() => undefined);
   await sleep(300);
@@ -212,6 +295,8 @@ async function visit(browser, floor) {
     heapMB: heap ? Math.round((heap.usedSize / 2 ** 20) * 10) / 10 : null,
     audioNodes: audio ? audioNodes : null,
     ws: { snapshotBytes, ...wsStats(frames, seconds) },
+    route: walked,
+    hitches,
     errors,
   };
   await context.close();
@@ -220,6 +305,7 @@ async function visit(browser, floor) {
 
 // ---------- the run ----------
 
+const out = values.out ?? path.join(os.tmpdir(), `cubefarm-bench-${Date.now()}.json`);
 let state = null;
 for (let i = 0; i < 240 && !state; i++) {
   if (server && server.exitCode !== null) throw new Error(`the office exited with code ${server.exitCode}`);
@@ -256,6 +342,8 @@ for (const floor of visits) {
       continue;
     }
     runs.push({ ...run, busy });
+    const h = run.hitches;
+    if (h) console.log(`  ${floor ? `floor ${floor}` : 'lobby  '} run ${r + 1}: worst frame ${run.frameMs.max} ms, ${run.frameMs.over100} frames over 100 ms; recorded ${h.frames} hitches (${h.causes.map(([c, n]) => `${n} ${c}`).join(', ') || 'none'}), ${h.programsLinked} programs linked, ${h.dprSteps} DPR steps, ${h.gfxChanges} tier changes${run.route ? `, ${run.route.legs} legs walked` : ''}`);
     const ws = `${(run.ws.bytesPerSecond / 1024).toFixed(1)} KB/s`;
     console.log(`  ${floor ? `floor ${floor}` : 'lobby  '} run ${r + 1}: ${run.fps} fps, p95 ${run.frameMs.p95} ms, main thread ${run.cpu.mainMsPerFrame} ms/frame, ${run.renderer?.calls ?? '?'} calls, ${run.renderer?.triangles ?? '?'} tris, heap ${run.heapMB} MB, ${run.audioNodes ?? '?'} audio nodes, ws ${ws}${run.errors.length ? `, ${run.errors.length} console errors` : ''}`);
   }
@@ -270,17 +358,16 @@ const report = {
   at: new Date().toISOString(),
   commit: `${git('rev-parse', '--short', 'HEAD')}${git('status', '--porcelain') ? '+dirty' : ''}`,
   office: { floors, people: state.agents.length, scale: values.url ? 'attached' : values.standard ? 'standard' : `${values.floors}x${values.agents}` },
-  browser: { angle, gpu, viewport: `${width}x${height}`, gfx: values.gfx ?? null, visitors: num(values.visitors) },
+  browser: { angle, gpu, viewport: `${width}x${height}`, scale: num(values.scale), throttle: num(values.throttle), gfx: values.gfx ?? null, visitors: num(values.visitors) },
   machine: { platform: process.platform, cpus: os.cpus().length, cpu: os.cpus()[0]?.model ?? null, memoryGB: Math.round(os.totalmem() / 2 ** 30), loadavg: os.loadavg() },
-  window: { seconds, warmup: num(values.warmup), runs: num(values.runs) },
+  window: { seconds, warmup: num(values.warmup), runs: num(values.runs), route: route > 0 },
   locations,
 };
-const out = values.out ?? path.join(os.tmpdir(), `cubefarm-bench-${Date.now()}.json`);
 fs.writeFileSync(out, JSON.stringify(report, null, 2));
-console.log(`\n${'where'.padEnd(10)}${'fps'.padStart(7)}${'p95 ms'.padStart(9)}${'cpu ms'.padStart(8)}${'calls'.padStart(8)}${'tris'.padStart(10)}${'heap MB'.padStart(9)}${'audio'.padStart(7)}${'ws KB/s'.padStart(9)}`);
+console.log(`\n${'where'.padEnd(10)}${'fps'.padStart(7)}${'p95 ms'.padStart(9)}${'worst'.padStart(8)}${'>100ms'.padStart(8)}${'hitches'.padStart(9)}${'cpu ms'.padStart(8)}${'calls'.padStart(8)}${'tris'.padStart(10)}${'heap MB'.padStart(9)}${'audio'.padStart(7)}${'ws KB/s'.padStart(9)}`);
 for (const l of locations) {
   const m = l.median;
-  console.log(`${l.name.padEnd(10)}${String(m.fps).padStart(7)}${String(m.frameMsP95).padStart(9)}${String(m.mainMsPerFrame).padStart(8)}${String(m.drawCalls).padStart(8)}${String(m.triangles).padStart(10)}${String(m.heapMB).padStart(9)}${String(m.audioNodes).padStart(7)}${(m.wsBytesPerSecond / 1024).toFixed(1).padStart(9)}`);
+  console.log(`${l.name.padEnd(10)}${String(m.fps).padStart(7)}${String(m.frameMsP95).padStart(9)}${String(m.frameMsMax).padStart(8)}${String(m.framesOver100).padStart(8)}${String(m.hitches).padStart(9)}${String(m.mainMsPerFrame).padStart(8)}${String(m.drawCalls).padStart(8)}${String(m.triangles).padStart(10)}${String(m.heapMB).padStart(9)}${String(m.audioNodes).padStart(7)}${(m.wsBytesPerSecond / 1024).toFixed(1).padStart(9)}`);
 }
 console.log(`\nreport: ${out}`);
 try {

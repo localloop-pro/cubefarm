@@ -1,9 +1,11 @@
-import { useEffect, useRef, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
-import { PerformanceMonitor, type PerformanceMonitorApi } from '@react-three/drei';
 import type * as THREE from 'three';
 import { coversView, useStore } from './store';
-import { gfxLabel } from './world/gfx/useGraphics';
+import { effectiveTier, gfxLabel, gfxPaused, useGfx } from './world/gfx/useGraphics';
+import { DPR, dprSample, dprSettle, newDpr } from './dprControl';
+import { glCounts, hitchFrame, hitchNote, hitchResume, hitchSummary, setHitchContext, startHitchRecorder, watchGl } from './hitches';
+import { statsLine } from './hitchLog';
 
 // Keeping the office cheap to leave open all day: the 3D view stops drawing while a panel hides it or
 // the tab is in the background, the resolution steps down when frames get slow (and Auto graphics, world/gfx,
@@ -50,27 +52,38 @@ export function FrameWhilePaused({ paused }: { paused: boolean }) {
   return null;
 }
 
-// Low/high fps bounds relative to the display's refresh rate, so a 60 Hz screen holding ~55 fps still
-// counts as healthy. The monitor reports the highest rate it has ever measured, and a burst of catch-up
-// frames can overshoot it (and then nothing ever counts as recovered), so snap it to a common display rate.
-function fpsBounds(measured: number): [number, number] {
-  const hz = measured > 130 ? 144 : measured > 100 ? 120 : 60;
-  return [Math.round(hz * 0.6), Math.round(hz * 0.9)];
-}
+// The adaptive resolution's state (its decisions are in dprControl.ts), outside React: a step changes the Canvas's
+// pixel ratio through R3F's own setDpr, so it never re-renders Game and the whole scene under it.
+const dprCap = () => Math.min(MAX_DPR, Math.max(1, window.devicePixelRatio || 1));
+const dprState = newDpr(dprCap());
+
+/** The pixel ratio the view draws at now. Game passes it to the Canvas, so a re-render never resets a step. */
+export const currentDpr = () => Math.min(dprState.dpr, dprCap());
 
 /**
- * Lives inside the Canvas. Steps the pixel ratio down toward 1 while the frame rate stays low, and
- * back up toward MAX_DPR once it recovers. No flip-flop limit: drei's fallback would stop monitoring and
- * leave the view at its lowest resolution for the rest of the day after one busy spell (a build, a test
- * run). The gap between the low and high bounds keeps it from bouncing between steps.
- *
- * Driven from onIncline/onDecline rather than onChange: drei compares against a `lastFactor` that is
- * reset to 0 on every render, and each step re-renders the Canvas, so the last step down to factor 0
- * looked unchanged and the view got stuck one step above DPR 1.
+ * Lives inside the Canvas. Steps the pixel ratio down toward 1 after sustained slow frames and back up toward
+ * MAX_DPR after sustained headroom, waiting longer after every step up that didn't hold (dprControl.ts): walking
+ * between busy and quiet parts of a floor never bounces it, and it never gives up and stays low all day. It holds
+ * still while the graphics tier changes, and on Auto it only steps down once the effects are off (Low); the tier's
+ * governor ignores the frames right after a step.
  */
-export function AdaptiveResolution({ onChange }: { onChange: (maxDpr: number) => void }) {
-  const apply = ({ factor }: PerformanceMonitorApi) => onChange(Math.round((1 + (MAX_DPR - 1) * factor) * 100) / 100);
-  return <PerformanceMonitor factor={1} step={0.25} bounds={fpsBounds} onIncline={apply} onDecline={apply} />;
+export function AdaptiveResolution({ paused }: { paused: boolean }) {
+  const setDpr = useThree((s) => s.setDpr);
+  useEffect(() => useGfx.subscribe((s, prev) => void ((s.tier !== prev.tier || s.shown !== prev.shown) && dprSettle(dprState))), []);
+  const onSample = useCallback(
+    (fps: number, ms: number) => {
+      const from = dprState.dpr;
+      const g = useGfx.getState();
+      const next = dprSample(dprState, fps, ms, { ...DPR, max: dprCap() }, g.preset !== 'auto' || effectiveTier(g) === 'low');
+      if (next === null || next === from) return;
+      hitchNote('dpr', `${from} → ${next} at ${Math.round(fps)} fps`);
+      gfxPaused();
+      setDpr(next);
+    },
+    [setDpr],
+  );
+  const onPause = useCallback(() => dprSettle(dprState), []);
+  return <FrameRateSampler paused={paused} onSample={onSample} onPause={onPause} />;
 }
 
 /**
@@ -100,6 +113,75 @@ export function FrameRateSampler({ paused, onSample, onPause }: { paused: boolea
     a.start = now;
     a.frames = 0;
   });
+  return null;
+}
+
+/**
+ * Lives inside the Canvas, always: the hitch recorder's frame clock (hitches.ts). Per frame it compares two numbers;
+ * a slow frame is written down with what was going on. `camera` and `events` come from the world, which this module
+ * doesn't import.
+ */
+export function HitchProbe({ paused, camera, events }: { paused: boolean; camera: () => string; events: () => string[] }) {
+  const gl = useThree((s) => s.gl);
+  useEffect(() => {
+    watchGl(gl.getContext());
+    startHitchRecorder();
+    setHitchContext({ camera, events, dpr: () => gl.getPixelRatio(), gfx: gfxLabel, textures: () => gl.info.memory.textures });
+    return () => setHitchContext(null);
+  }, [gl, camera, events]);
+  useEffect(() => {
+    if (paused) hitchResume();
+  }, [paused]);
+  useFrame(() => {
+    if (!paused) hitchFrame(); // FrameWhilePaused's one-off frames aren't the loop
+  });
+  return null;
+}
+
+const PRECOMPILE_GAP_MS = 8000;
+
+/**
+ * Lives inside the Canvas. Compiles the shaders of everything in the scene, not just what's in view, soon after it
+ * appears: entering a floor, a world event, a theme, a graphics tier's extras. Otherwise each compiles the first time
+ * it comes into view (turning round to the kitchenette, looking out of a window), stalling that frame. With
+ * KHR_parallel_shader_compile the browser compiles them off the main thread. Checks about once a second whether the
+ * scene holds more meshes than it ever has since the last floor change (speech bubbles coming and going don't count
+ * twice), never per frame.
+ */
+export function ScenePrecompile({ paused, watch }: { paused: boolean; watch: string }) {
+  const gl = useThree((s) => s.gl);
+  const scene = useThree((s) => s.scene);
+  const camera = useThree((s) => s.camera);
+  const last = useRef(-1);
+  const lastAt = useRef(0);
+  const busy = useRef(false);
+  useEffect(() => {
+    last.current = -1;
+    lastAt.current = 0;
+  }, [watch]);
+  useEffect(() => {
+    if (paused) return;
+    const t = setInterval(() => {
+      if (busy.current) return;
+      let n = 0;
+      scene.traverseVisible((o) => void ((o as THREE.Mesh).isMesh && n++));
+      // Compiling walks every material in the scene: at most every PRECOMPILE_GAP_MS, except on a new floor.
+      if (n <= last.current || performance.now() - lastAt.current < PRECOMPILE_GAP_MS) return;
+      last.current = n;
+      lastAt.current = performance.now();
+      busy.current = true;
+      const from = glCounts.compiles;
+      const t0 = performance.now();
+      gl.compileAsync(scene, camera)
+        .then(() => {
+          const k = glCounts.compiles - from;
+          if (k) hitchNote('precompile', `${k} programs for ${n} meshes in ${Math.round(performance.now() - t0)} ms`);
+        })
+        .catch(() => undefined)
+        .finally(() => void (busy.current = false));
+    }, 1200);
+    return () => clearInterval(t);
+  }, [paused, gl, scene, camera]);
   return null;
 }
 
@@ -157,7 +239,7 @@ export function StatsProbe({ paused }: { paused: boolean }) {
     const { calls, triangles } = gl.info.render;
     const fps = (a.frames * 1000) / elapsed;
     Object.assign(probe, { fps: Math.round(fps * 10) / 10, ms: Math.round((elapsed / a.frames) * 10) / 10, calls, triangles, geometries: gl.info.memory.geometries, textures: gl.info.memory.textures, programs: gl.info.programs?.length ?? 0 });
-    readoutEl.textContent = `${Math.round(fps)} fps · ${(elapsed / a.frames).toFixed(1)} ms · ${calls} calls · ${fmt(triangles)} tris · dpr ${gl.getPixelRatio().toFixed(2)} · gfx ${gfxLabel()}`;
+    readoutEl.textContent = `${Math.round(fps)} fps · ${(elapsed / a.frames).toFixed(1)} ms · ${calls} calls · ${fmt(triangles)} tris · dpr ${gl.getPixelRatio().toFixed(2)} · gfx ${gfxLabel()} · ${statsLine(hitchSummary())}`;
     a.start = now;
     a.frames = 0;
   });
