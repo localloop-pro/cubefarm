@@ -21,7 +21,7 @@ import { fixGoesTo, pickTester, PREP_HOLD_MS, prepFailure, prepHeld, type PrepSt
 import { HttpError } from './httpError.ts';
 import { IssueAges } from './issueAges.ts';
 import { issuesResolvedBy, issueTaken } from './issueClaims.ts';
-import { CHECKS_ALERT_MS, failedRunIds, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
+import { CHECKS_ALERT_MS, failedRunIds, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeGate, mergeStep, type GateRecord, type GateRefusal } from './mergeGate.ts';
 import { orphanedQa } from './qaOrphans.ts';
 import { catchUp, failedRunId, logTail, noChangeReason, PR_LIMITS_VERSION, QA_STOPPED, unpushedFix } from './prOwnership.ts';
 import { conflictFixInstructions, MAX_QA_ROUNDS, qaGate, qaOutcome, type PreQa, type QaNext } from './qaOutcome.ts';
@@ -1627,17 +1627,14 @@ export class Swarm {
     }
     if (step.do !== 'merge') return false;
     this.mergeNote(rec, 'merging…');
-    let error = '';
-    for (const method of ['squash', 'merge', 'rebase'] as const) {
-      try {
-        await this.backend.mergePull(repo.fullName, pr.number, method, rec.passedSha ?? pr.headSha);
-        error = '';
-        break;
-      } catch (err) {
-        error = oneLine(err).replace(/^gh .*? failed: /, '');
-        if (!/not allowed/i.test(error)) break; // only a merge method the repo turned off is worth another try
-      }
+    const merge = await gatedMerge(this.backend, repo.fullName, pr.number, rec, ['squash', 'merge', 'rebase']);
+    if (!merge.ok) {
+      // The fresh detail disagrees with what QA passed: QA looks again rather than merging anything else.
+      this.setQa(rec, { status: 'queued', round: rec.round + 1, retests: rec.retests + 1, mergeNote: null, pendingSince: null });
+      setTimeout(() => this.schedule(), 200);
+      return false;
     }
+    const error = merge.error;
     if (error && /head (branch|commit)/i.test(error)) return this.mergeNote(rec, 'new commits arrived; QA checks them first'); // the next sync re-queues it
     if (error) {
       rec.mergeRetryAt = Date.now() + MERGE_RETRY_MS;
@@ -1920,8 +1917,11 @@ export class Swarm {
 
   async mergePull(repoId: string, number: number, method: 'squash' | 'merge' | 'rebase' = 'squash') {
     const repo = this.repo(repoId);
-    const pr = this.repoRt.get(repo.id)?.pulls.find((p) => p.number === number) ?? (await this.backend.prDetails(repo.fullName, number));
-    await this.backend.mergePull(repo.fullName, number, method);
+    const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number);
+    const merge = await gatedMerge(this.backend, repo.fullName, number, rec ? { status: rec.status, passedSha: rec.passedSha } : { status: null, passedSha: null }, [method]);
+    if (!merge.ok) throw new HttpError(409, `PR #${number} can't be merged: ${merge.reason}${merge.detail ? ` (${merge.detail})` : ''}`);
+    if (merge.error) throw new HttpError(409, `GitHub won't merge PR #${number}: ${merge.error}`);
+    const pr = merge.pr;
     this.toast('success', `Merged PR #${number} into ${repo.defaultBranch}`);
     this.notifyMerge(repo, number, pr.title);
     await this.closeResolvedIssues(repo, number, pr);
@@ -5531,4 +5531,30 @@ export class Swarm {
     await this.syncRepo(repo.id);
     return `Closed #${n} on floor ${repo.floor} as not planned.${stopped.length ? ` ${nameList(stopped)} stopped working on it.` : ''}`;
   }
+}
+
+// ---------- gated merge ----------
+
+export type GatedMerge = { ok: true; pr: PrDetails; error: string } | { ok: false; reason: GateRefusal; detail?: string };
+
+/**
+ * Both merge paths (the manager's button and auto-merge) go through here: one fresh PR detail, the final gate on it,
+ * then a merge pinned to QA's passed commit (`--match-head-commit`). `methods` are tried in order only while GitHub
+ * says a method is turned off; `error` is GitHub's last refusal ('' when it merged).
+ */
+export async function gatedMerge(backend: Pick<Backend, 'prDetails' | 'mergePull'>, fullName: string, number: number, rec: GateRecord, methods: readonly ('squash' | 'merge' | 'rebase')[]): Promise<GatedMerge> {
+  const pr = await backend.prDetails(fullName, number);
+  const gate = mergeGate(rec, pr);
+  if (!gate.allow) return { ok: false, reason: gate.reason, detail: gate.detail };
+  let error = '';
+  for (const method of methods) {
+    try {
+      await backend.mergePull(fullName, number, method, gate.sha);
+      return { ok: true, pr, error: '' };
+    } catch (err) {
+      error = oneLine(err).replace(/^gh .*? failed: /, '');
+      if (!/not allowed/i.test(error)) break; // only a merge method the repo turned off is worth another try
+    }
+  }
+  return { ok: true, pr, error };
 }

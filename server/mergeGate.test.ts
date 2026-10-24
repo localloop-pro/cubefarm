@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, RERUN_GRACE_MS, failedRunIds, mergeStep, type MergePull, type MergeRecord } from './mergeGate.ts';
+import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, RERUN_GRACE_MS, failedRunIds, mergeGate, mergeStep, type GatePull, type GateRecord, type MergePull, type MergeRecord } from './mergeGate.ts';
 
 const NOW = 1_800_000_000_000;
 const base = { base: 'main' };
@@ -69,11 +69,8 @@ describe('mergeStep', () => {
       expect(mergeStep(pull({ headSha: 'new456', mergeable: 'CONFLICTING', checks: 'failing' }), record(), NOW, base).do).toBe('requeue');
     });
 
-    it('adopts the head as the passed commit for records from before commits were tracked', () => {
-      expect(mergeStep(pull({ headSha: 'def789' }), record({ passedSha: null }), NOW, base)).toEqual({
-        do: 'merge',
-        set: { passedSha: 'def789', pendingSince: null },
-      });
+    it('never adopts the head as the passed commit when QA recorded none', () => {
+      expect(mergeStep(pull({ headSha: 'def789' }), record({ passedSha: null }), NOW, base)).toEqual({ do: 'requeue', set: {} });
     });
   });
 
@@ -224,5 +221,60 @@ describe('mergeStep', () => {
     it('still updates a branch that fell behind while waiting', () => {
       expect(mergeStep(pull({ mergeState: 'BEHIND' }), record({ mergeRetryAt: NOW + 60_000 }), NOW, base).do).toBe('update-branch');
     });
+  });
+});
+
+describe('mergeGate', () => {
+  const rec = (r: Partial<GateRecord> = {}): GateRecord => ({ status: 'passed', passedSha: 'abc123', ...r });
+  const pr = (p: Partial<GatePull> = {}): GatePull => ({
+    state: 'OPEN',
+    isDraft: false,
+    headSha: 'abc123',
+    checks: 'passing',
+    reviewDecision: 'APPROVED',
+    mergeState: 'CLEAN',
+    ...p,
+  });
+  const reason = (r: GateRecord, p: GatePull) => {
+    const d = mergeGate(r, p);
+    return d.allow ? 'allow' : d.reason;
+  };
+
+  it("allows a clean, green, open PR at QA's passed commit", () => {
+    expect(mergeGate(rec(), pr())).toEqual({ allow: true, sha: 'abc123' });
+    expect(mergeGate(rec(), pr({ reviewDecision: null }))).toEqual({ allow: true, sha: 'abc123' });
+  });
+
+  it('refuses unless QA passed', () => {
+    for (const status of ['failed', 'testing', null, undefined]) expect(reason(rec({ status }), pr())).toBe('not-passed');
+  });
+
+  it('refuses a missing passedSha instead of adopting the head', () => {
+    expect(reason(rec({ passedSha: null }), pr())).toBe('no-passed-sha');
+    expect(reason(rec({ passedSha: '' }), pr({ headSha: '' }))).toBe('no-passed-sha');
+  });
+
+  it('refuses when the head moved past the passed commit', () => {
+    expect(reason(rec(), pr({ headSha: 'def789' }))).toBe('head-moved');
+  });
+
+  it('refuses closed, merged, unknown-state and draft PRs', () => {
+    for (const state of ['CLOSED', 'MERGED', null, undefined]) expect(reason(rec(), pr({ state }))).toBe('not-open');
+    expect(reason(rec(), pr({ isDraft: true }))).toBe('draft');
+    expect(reason(rec(), pr({ isDraft: undefined }))).toBe('draft');
+  });
+
+  it('refuses anything but explicitly passing checks', () => {
+    for (const checks of ['none', 'pending', 'failing'] as const) expect(reason(rec(), pr({ checks }))).toBe('checks-not-passing');
+  });
+
+  it('refuses requested changes', () => {
+    expect(reason(rec(), pr({ reviewDecision: 'CHANGES_REQUESTED' }))).toBe('changes-requested');
+  });
+
+  it('refuses any merge state but CLEAN', () => {
+    for (const mergeState of ['BLOCKED', 'BEHIND', 'DIRTY', 'UNSTABLE', 'UNKNOWN', 'DRAFT', '']) {
+      expect(reason(rec(), pr({ mergeState }))).toBe('merge-state');
+    }
   });
 });

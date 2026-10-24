@@ -259,9 +259,8 @@ export interface PrDetails {
   checkNames: string[]; // every check on the head commit, once each
   failedChecks: string[];
   pendingChecks: string[];
-  // optional until every caller and the demo fill them (S2.3)
-  isDraft?: boolean;
-  reviewDecision?: string | null;
+  isDraft: boolean;
+  reviewDecision: string | null;
 }
 
 const uniqueNames = (checks: Check[]) => [...new Set(checks.map(checkName))];
