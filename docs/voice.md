@@ -139,6 +139,17 @@ is explained in one line. The mic is only ever on while you hold the button or V
 (a tap, hands-free). While it listens, the jukebox and other sounds dip, a message being read dips by about 15 dB (the
 browser's voice pauses), the office's cues (merge, QA, errors) wait until it closes, and the merge gong stays quiet.
 
+### If the 🎙️ does nothing
+
+Open **Settings → Voice** and read **Mic check**, then use **Test mic**. The usual causes are:
+
+- the office is open on a plain `http://` LAN or Tailscale address; microphones require HTTPS or `http://localhost`;
+- microphone permission is blocked in the browser's address-bar/site settings; or
+- hands-free has **Listen** or **Speak messages** switched off. Hands-free requires both, plus microphone permission.
+
+The 🎙️ is visibly dimmed on an insecure address and explains how to reopen the office safely. The office never asks
+for microphone permission without a click and never logs or stores audio or transcripts.
+
 `window.__swarmMic` shows the 🎙️'s `state` (`idle`, `listening`, `transcribing` or `error`), `mode` (`hold`, `tap`,
 `handsfree`), whether the mic is `live`, the last `transcript`, the `provider`, the last `error`, what this browser
 `supported`s, the hands-free state and a `history` of sessions with their outcome. Headless browsers have no mic:

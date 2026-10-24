@@ -14,7 +14,7 @@ import { bindings } from './controls';
 import { HANDS_FREE_IDLE, handsFree, type HandsFree, type HandsFreeEvent, type Room } from './handsFree';
 import { closesMic, HOLD_MS, isTalkKey, type KeyPlace } from './micKeys';
 import { freshEars, heardLevel, heardWords, listenRules, sendsWhenDone, verdict, type Ears, type MicMode } from './micSilence';
-import { cantListen, micErrorLine, phrasesText, withTranscript, type MicCaps, type Phrase } from './micText';
+import { cantListen, MIC_SECURE_LINE, micErrorLine, phrasesText, withTranscript, type MicCaps, type Phrase } from './micText';
 import { holdMusicDuck } from './music';
 import { getAudioPrefs, listenChime, setMicOpen, subscribeAudio } from './sfx';
 
@@ -30,9 +30,11 @@ export interface MicView {
   live: boolean;
   /** The hands-free phone is chiming before it listens. */
   chiming: boolean;
+  /** When the current microphone request began, for permission-prompt guidance. */
+  warmingSince: number | null;
 }
 
-export const useMic = create<MicView>(() => ({ state: 'idle', mode: null, target: null, live: false, chiming: false }));
+export const useMic = create<MicView>(() => ({ state: 'idle', mode: null, target: null, live: false, chiming: false, warmingSince: null }));
 
 /** A message box with a 🎙. */
 export interface MicTarget {
@@ -88,6 +90,7 @@ const recognitionClass = (): RecognitionClass | null => (fakeOn ? FakeRecognitio
 
 export function micCaps(): MicCaps {
   return {
+    secure: window.isSecureContext,
     recognition: !!recognitionClass(),
     recorder: typeof MediaRecorder !== 'undefined' && !!navigator.mediaDevices?.getUserMedia,
   };
@@ -146,6 +149,7 @@ let lastTranscript = '';
 let lastError = '';
 /** The browser lets the office use the mic (it said so, or a session got a live mic): hands-free never asks unprompted. */
 let micAllowed = false;
+let micPermission: PermissionState | 'unavailable' = 'unavailable';
 let askedToAllow = false;
 const STARTUP_MS = 10_000; // a mic that never comes on (a permission prompt left open) gives up
 
@@ -179,7 +183,7 @@ export function listen(id: string, mode: MicMode) {
   history.push(record);
   if (history.length > 30) history.splice(0, history.length - 30);
   lastError = '';
-  set({ state: 'listening', mode, target: id, live: false, chiming: false });
+  set({ state: 'listening', mode, target: id, live: false, chiming: false, warmingSince: performance.now() });
   if (provider === 'browser') s.hearing = recognise(n);
   else void recordClip(n);
 }
@@ -210,7 +214,7 @@ function check(n: number) {
   if (!s || s.finishing) return;
   const now = performance.now();
   if (!s.ears) {
-    if (now - s.began > STARTUP_MS) cancel('stopped');
+    if (now - s.began > STARTUP_MS) fail(n, micErrorLine('not-allowed', micCaps().secure));
     return;
   }
   const v = verdict(s.ears, now, listenRules(s.mode, listening().autoSend));
@@ -224,7 +228,7 @@ function started(n: number) {
   if (!s || s.ears) return;
   s.ears = freshEars(performance.now());
   micAllowed = true;
-  set({ live: true });
+  set({ live: true, warmingSince: null });
 }
 
 function heard(n: number, text: string, speaking: boolean) {
@@ -302,7 +306,7 @@ function close(outcome: NonNullable<MicRecord['outcome']>) {
     record.outcome = outcome;
     record = null;
   }
-  set({ state: 'idle', mode: null, target: null, live: false });
+  set({ state: 'idle', mode: null, target: null, live: false, warmingSince: null });
   if (s.mode === 'handsfree') {
     if (outcome !== 'sent') listenChime(false);
     step({ type: 'closed' });
@@ -355,7 +359,7 @@ function recognise(n: number): Hearing | null {
   r.onend = () => {
     const s = live(n);
     if (!s) return;
-    if (error) fail(n, micErrorLine(error));
+    if (error) fail(n, micErrorLine(error, micCaps().secure));
     else deliver(s); // stopped by us, or the browser stopped by itself after a quiet
   };
   try {
@@ -376,7 +380,7 @@ async function recordClip(n: number) {
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
   } catch (err) {
-    return fail(n, micErrorLine((err as DOMException)?.name || 'audio-capture'));
+    return fail(n, micErrorLine((err as DOMException)?.name || 'audio-capture', micCaps().secure));
   }
   const off = () => stream.getTracks().forEach((t) => t.stop());
   const s = live(n);
@@ -532,18 +536,30 @@ export async function setHandsFree(on: boolean, ceoName: string) {
   if (why) return useStore.getState().pushToast('info', why);
   if (on && !(await allowMic())) return;
   await api.updateSettings({ listen: { ...listening(), handsFree: on } }).catch(() => undefined);
+  if (on) {
+    useStore.getState().pushToast('info', '🎧 Hands-free on: after each reply, just talk.');
+    if (useStore.getState().settings.voice.provider === 'browser' && (!window.speechSynthesis || window.speechSynthesis.getVoices().length === 0)) {
+      useStore.getState().pushToast('info', '🔇 Browser voice is on, but this browser has no speech voices available yet.');
+    }
+  }
 }
 
 /** Asks for the microphone (once per page at most), so hands-free never asks later unprompted. */
-async function allowMic(): Promise<boolean> {
+export async function allowMic(): Promise<boolean> {
   if (micAllowed) return true;
+  const getUserMedia = navigator.mediaDevices?.getUserMedia?.bind(navigator.mediaDevices);
+  if (!getUserMedia) {
+    useStore.getState().pushToast('error', MIC_SECURE_LINE);
+    lastError = MIC_SECURE_LINE;
+    return false;
+  }
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await getUserMedia({ audio: true });
     stream.getTracks().forEach((t) => t.stop());
     micAllowed = true;
     return true;
   } catch (err) {
-    const line = micErrorLine((err as DOMException)?.name || 'audio-capture');
+    const line = micErrorLine((err as DOMException)?.name || 'audio-capture', micCaps().secure);
     if (line) useStore.getState().pushToast('error', line);
     return false;
   }
@@ -662,8 +678,12 @@ if (typeof window !== 'undefined') {
   void navigator.permissions
     ?.query({ name: 'microphone' as PermissionName })
     .then((p) => {
+      micPermission = p.state;
       micAllowed ||= p.state === 'granted';
-      p.addEventListener('change', () => (micAllowed = p.state === 'granted'));
+      p.addEventListener('change', () => {
+        micPermission = p.state;
+        micAllowed = p.state === 'granted';
+      });
     })
     .catch(() => undefined);
 }
@@ -725,6 +745,12 @@ const probe = {
   },
   get supported() {
     return micCaps();
+  },
+  get secure() {
+    return micCaps().secure;
+  },
+  get permission() {
+    return micPermission;
   },
   get handsFree() {
     return hf.kind;

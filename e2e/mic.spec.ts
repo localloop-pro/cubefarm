@@ -8,6 +8,8 @@ interface MicProbe {
   state: string;
   mode: string | null;
   live: boolean;
+  secure: boolean;
+  permission: string;
   history: { mode: string; outcome: string | null; start: number; end: number | null }[];
   fake(on?: boolean): void;
   say(text: string, final?: boolean): boolean;
@@ -123,6 +125,24 @@ test('a browser without speech recognition explains itself and listens to nothin
   await button.click();
   await expect(page.getByText(/can't turn speech into text/).first()).toBeVisible();
   expect((await mic(page)).state).not.toBe('listening');
+});
+
+test('an insecure office disables mic and hands-free with the HTTPS explanation', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false }));
+  await page.request.patch('/api/settings', { data: { voice: { provider: 'browser' }, listen: LISTEN } });
+  await enterOffice(page);
+  await page.keyboard.press('p');
+  if (!(await box(page).isVisible())) await page.locator('.phone-tab').first().click();
+  const button = page.locator('.chat-input .mic-btn');
+  await expect(button).toHaveClass(/mic-cant/);
+  await expect(button).toHaveAttribute('title', /HTTPS address or on localhost/);
+  await button.click({ force: true });
+  await expect(page.getByText(/HTTPS address or on localhost/).first()).toBeVisible();
+  await page.getByRole('button', { name: /Hands-free/ }).click({ force: true });
+  await expect(page.getByText(/HTTPS address or on localhost/).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: /Hands-free/ })).toHaveAttribute('aria-pressed', 'false');
+  expect(await page.evaluate(() => (window as unknown as MicWindow).__swarmMic.secure)).toBe(false);
+  await page.request.patch('/api/settings', { data: { voice: { provider: 'off' }, listen: LISTEN } });
 });
 
 test('the ElevenLabs route refuses what it should, in plain words, and never shows the key', async ({ request }) => {

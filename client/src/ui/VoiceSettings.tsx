@@ -8,7 +8,7 @@ import { SAMPLE_LINE } from '../../../shared/speech';
 import { cacheLabel, clampKeepDays, KEEP_DAYS_MAX, KEEP_DAYS_MIN } from '../../../shared/voiceClips';
 import { CEO_ID, type ListenProvider, type ListenSettings, type VoiceOption, type VoiceProvider, type VoiceSettings as Voice } from '../../../shared/types';
 import { confirmDialog } from './Confirm';
-import { micCaps, setHandsFree } from './mic';
+import { allowMic, micCaps, setHandsFree } from './mic';
 import { cantListen } from './micText';
 import { getAudioPrefs } from './sfx';
 import { keyName } from './controls';
@@ -391,7 +391,8 @@ export function VoiceSettings() {
 function Listening({ keyShown }: { keyShown: boolean }) {
   const listen = useStore((s) => s.settings.listen);
   const keySet = useStore((s) => s.voiceKeySet);
-  const voiceOn = useStore((s) => s.settings.voice.provider !== 'off');
+  const voiceProvider = useStore((s) => s.settings.voice.provider);
+  const voiceOn = voiceProvider !== 'off';
   const ceoName = useStore((s) => s.agents[CEO_ID]?.name ?? 'the CEO');
   const radioName = useId();
   if (!listen) return null;
@@ -417,6 +418,7 @@ function Listening({ keyShown }: { keyShown: boolean }) {
         ))}
       </div>
       {why && <p className="term-error small">{why}</p>}
+      {listen.provider !== 'off' && <MicCheck voiceProvider={voiceProvider} listenProvider={listen.provider} />}
       {listen.provider === 'elevenlabs' && (
         <>
           <p className="muted small">
@@ -437,6 +439,40 @@ function Listening({ keyShown }: { keyShown: boolean }) {
           </label>
         </>
       )}
+    </div>
+  );
+}
+
+function MicCheck({ voiceProvider, listenProvider }: { voiceProvider: VoiceProvider; listenProvider: ListenProvider }) {
+  const [permission, setPermission] = useState<PermissionState | 'unavailable'>('unavailable');
+  const [result, setResult] = useState('');
+  const caps = micCaps();
+  useEffect(() => {
+    let live = true;
+    void navigator.permissions
+      ?.query({ name: 'microphone' as PermissionName })
+      .then((p) => {
+        if (!live) return;
+        setPermission(p.state);
+        const changed = () => setPermission(p.state);
+        p.addEventListener('change', changed);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, []);
+  const test = async () => {
+    setResult('Checking…');
+    setResult((await allowMic()) ? 'Microphone ready.' : 'Microphone unavailable — see the message above.');
+  };
+  return (
+    <div className="mic-check small" aria-label="Mic check">
+      <b>Mic check</b>: secure page {caps.secure ? 'yes' : 'no'} · speech recognition {caps.recognition ? 'yes' : 'no'} · recorder {caps.recorder ? 'yes' : 'no'} · permission {permission} · Speak messages {voiceProvider} · Listen {listenProvider}
+      <button type="button" className="tiny" onClick={() => void test()}>
+        Test mic
+      </button>
+      {result && <span role="status">{result}</span>}
     </div>
   );
 }

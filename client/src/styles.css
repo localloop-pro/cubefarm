@@ -2465,6 +2465,14 @@ input.inline:focus {
 .listen-settings p {
   margin: 0;
 }
+
+.mic-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.55rem 0;
+}
 .voice-list {
   position: relative; /* rows' offsetTop, for scrolling the chosen one into view */
   max-height: 300px;
