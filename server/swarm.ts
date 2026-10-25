@@ -13,6 +13,7 @@ import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
 import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type LastUpdate } from './officeUpdate.ts';
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
 import { isCli } from './clis.ts';
+import { mayReserveSlot } from './sessionSlots.ts';
 import { AgentTerminal } from './terminal.ts';
 import { blockers, holdUps, issueSpecialty } from '../shared/issues.ts';
 import { effectiveModel } from '../shared/models.ts';
@@ -593,7 +594,7 @@ export class Swarm {
         this.clearTask(a);
         continue;
       }
-      if (this.paused() || this.slotsFull()) continue; // stays 'stopped'; the manager can resume it later
+      if (this.paused() || !this.maySlot(a)) continue; // stays 'stopped'; the manager can resume it later
       void this.message(a.id, 'The office server restarted while you were working. Check the state of your worktree and continue where you left off.').catch((err) =>
         console.warn(`could not resume ${a.name}`, err),
       );
@@ -808,14 +809,52 @@ export class Swarm {
     return a;
   }
 
-  private running() {
-    return this.state.agents.filter((a) => BUSY.includes(a.status)).length;
+  /** Sessions holding a slot: preparing, working, or reserved by a launch that hasn't set its status yet. */
+  private running(except?: string) {
+    return this.state.agents.filter((a) => a.id !== except && (BUSY.includes(a.status) || this.slots.has(a.id))).length;
   }
 
-  /** True when the manager has set a session limit and every slot is taken. */
-  private slotsFull() {
+  /** May this agent (one more session) take a slot? It isn't counted against itself, so a holder can recheck. */
+  private maySlot(a: { id: string; role: string }) {
+    const ceo = this.state.agents.find((x) => x.id === CEO_ID);
+    const ceoIdle = !!ceo && ceo.id !== a.id && !BUSY.includes(ceo.status) && !this.slots.has(ceo.id);
     const limit = this.state.settings.sessionLimit;
-    return limit > 0 && this.running() >= limit;
+    return mayReserveSlot({ sessionLimit: limit, active: this.running(a.id), ceoIdle, requester: a.role === 'ceo' ? 'ceo' : 'worker' });
+  }
+
+  /** True when no worker could take a session slot now (one stays free for an idle CEO). */
+  private slotsFull() {
+    return !this.maySlot({ id: '', role: 'worker' });
+  }
+
+  /**
+   * Launch paths run through here: the slot is reserved synchronously, before any async desk preparation, and released
+   * however the launch ends (a started session then counts through its status). A throw that leaves the agent
+   * preparing becomes an error, so a failed preparation never holds a slot.
+   */
+  private async withSlot(a: PersistedAgent, launch: () => Promise<void>) {
+    if (this.slots.has(a.id) || !this.maySlot(a)) return;
+    this.slots.add(a.id);
+    try {
+      await launch();
+    } catch (err) {
+      if (a.status === 'preparing' || (a.status === 'working' && !this.agentRt.get(a.id)?.session)) {
+        a.status = 'error';
+        a.endedAt = Date.now();
+        a.lastError = (err as Error).message;
+        if (a.id === CEO_ID) this.state.ceo.job = null;
+        this.appendLog(a, [{ kind: 'error', text: `✗ ${a.lastError}` }]);
+        this.emitAgent(a);
+        this.save();
+      } else console.warn(`launch of ${a.name} failed`, err);
+    } finally {
+      this.slots.delete(a.id);
+    }
+  }
+
+  /** Recheck right before launch: the pause, and the slot policy (the limit may have dropped while preparing). */
+  private mustHold(a: PersistedAgent) {
+    return this.paused() || !this.maySlot(a);
   }
 
   private agentSlug(a: PersistedAgent) {
@@ -829,7 +868,8 @@ export class Swarm {
 
   /** Work whose desk was prepared when a pause landed: nothing launches, the desk is kept for later. */
   private holdForPause(a: PersistedAgent) {
-    this.appendLog(a, [{ kind: 'system', text: '⏸ The scheduler was paused while preparing; nothing started.' }]);
+    const why = this.paused() ? 'The scheduler was paused' : 'The session slots filled up';
+    this.appendLog(a, [{ kind: 'system', text: `⏸ ${why} while preparing; nothing started.` }]);
     this.clearTask(a);
     this.save();
   }
@@ -1442,8 +1482,8 @@ export class Swarm {
     return pulls.some((p) => p.state === 'OPEN' && (p.closesIssues.includes(n) || p.headRefName.startsWith(`swarm/issue-${n}-`)));
   }
 
-  private ensureSlot() {
-    if (this.slotsFull()) {
+  private ensureSlot(a: PersistedAgent) {
+    if (!this.maySlot(a)) {
       throw new HttpError(429, `All ${this.state.settings.sessionLimit} session slots are busy. Raise or clear the session limit in the manager's console, or wait.`);
     }
   }
@@ -1454,12 +1494,12 @@ export class Swarm {
     if (a.role === 'qa') throw new HttpError(400, `${a.name} is a QA tester; they test pull requests rather than issues.`);
     if (a.role === 'ceo') throw new HttpError(400, `${a.name} runs the company; give issues to the developers.`);
     if (BUSY.includes(a.status)) throw new HttpError(409, `${a.name} is already working on #${a.issueNumber}`);
-    this.ensureSlot();
+    this.ensureSlot(a);
     const issue = this.repoRt.get(repo.id)?.issues.find((i) => i.number === issueNumber);
     if (!issue) throw new HttpError(404, `Issue #${issueNumber} is not open on ${repo.fullName}`);
     const holder = this.state.agents.find((x) => x.id !== a.id && x.repoId === repo.id && x.issueNumber === issueNumber && BUSY.includes(x.status));
     if (holder) throw new HttpError(409, `${holder.name} is already working on #${issueNumber}`);
-    void this.runTask(a, repo, issue, note);
+    void this.withSlot(a, () => this.runTask(a, repo, issue, note));
     return this.agentView(a, false);
   }
 
@@ -1619,7 +1659,7 @@ export class Swarm {
     );
     const cwd = await this.prepare(a, repo, {}, branch);
     if (!cwd) return;
-    if (this.paused()) return this.holdForPause(a); // the issue goes back on the board; the desk stays
+    if (this.mustHold(a)) return this.holdForPause(a); // the issue goes back on the board; the desk stays
 
     const prompt = [
       `Please resolve GitHub issue #${issue.number}: ${issue.title}`,
@@ -1911,7 +1951,7 @@ export class Swarm {
       if (this.state.qa.includes(rec) && rec.status === 'testing') this.setQa(rec, { status: 'queued', qaAgentId: null });
       return;
     }
-    if (this.paused()) {
+    if (this.mustHold(a)) {
       if (this.state.qa.includes(rec) && rec.status === 'testing') this.setQa(rec, { status: 'queued', qaAgentId: null });
       return this.holdForPause(a);
     }
@@ -2058,7 +2098,7 @@ export class Swarm {
       if (rec.status === 'fixing') this.setQa(rec, { status: 'failed' });
       return;
     }
-    if (this.paused()) {
+    if (this.mustHold(dev)) {
       if (rec.status === 'fixing') this.setQa(rec, { status: 'failed' });
       return this.holdForPause(dev);
     }
@@ -2144,7 +2184,7 @@ export class Swarm {
     if (a.role === 'qa') throw new HttpError(409, `${a.name} isn't testing anything right now. Send a PR to QA from the Kanban board.`);
     if (a.status === 'preparing') throw new HttpError(409, `${a.name} is still setting up; try again in a moment`);
     if (!a.sessionId || !a.branch || a.task === 'qa') throw new HttpError(409, `${a.name} has no session to continue. Assign an issue instead.`);
-    this.ensureSlot();
+    this.ensureSlot(a);
     this.appendLog(a, [{ kind: 'manager', text: `▶ Manager: ${text}` }]);
     const cwd = this.backend.deskDir(repo.fullName, this.agentSlug(a));
     a.lastError = null;
@@ -2216,6 +2256,7 @@ export class Swarm {
 
   private scheduleOffset = 0;
   private issueFailures = new Map<string, number>(); // `${repoId}#${issue}` → failed sessions on it
+  private slots = new Set<string>(); // agent ids holding a session slot while their launch prepares
   private nudged = new Set<string>(); // `${repoId}#${issue}`: its developer was asked once to finish the missing PR
   private pausedUntil = 0; // Claude's usage limit was hit: nothing new starts before this
   private pacingUntil = 0; // Claude warned about usage: new issues are paced until this
@@ -2273,7 +2314,7 @@ export class Swarm {
           (a) => /test|qa/i.test(a.specialty),
         );
       if (!tester) continue;
-      void this.runQa(tester, repo, rec);
+      void this.withSlot(tester, () => this.runQa(tester, repo, rec));
       return true;
     }
     for (const rec of waiting('failed')) {
@@ -2281,7 +2322,7 @@ export class Swarm {
       const want = issue ? issueSpecialty(issue.labels) : null;
       const dev = devs.find((a) => a.id === rec.devAgentId) ?? this.pickDev(repo, devs, (a) => a.specialty.toLowerCase() === want);
       if (!dev) break;
-      void this.runFix(dev, repo, rec);
+      void this.withSlot(dev, () => this.runFix(dev, repo, rec));
       return true;
     }
     return false;
@@ -2630,7 +2671,7 @@ export class Swarm {
     const a = this.state.agents.find((x) => x.id === CEO_ID);
     const c = this.state.ceo;
     if (!a || BUSY.includes(a.status) || c.job || c.queue.length === 0) return;
-    if (this.paused() || this.slotsFull()) return;
+    if (this.paused() || !this.maySlot(a)) return;
     const rank: Record<CeoJob['kind'], number> = { chat: 0, onboard: 1, plan: 1, review: 2 };
     // A floor's jobs wait for its clone and first sync, so the CEO has something to read.
     const ready = (j: CeoJob) => {
@@ -2648,7 +2689,7 @@ export class Swarm {
       this.save();
       return this.startCeoWork();
     }
-    void this.runCeoJob(a, job);
+    void this.withSlot(a, () => this.runCeoJob(a, job));
   }
 
   private async runCeoJob(a: PersistedAgent, job: CeoJob) {
@@ -2671,7 +2712,7 @@ export class Swarm {
     this.emitCeo();
     this.save();
     await fs.mkdir(CEO_DIR, { recursive: true }).catch(() => undefined);
-    if (a.status === 'working' && this.paused()) {
+    if (a.status === 'working' && this.mustHold(a)) {
       // paused while preparing: the job waits at the front of the queue
       this.state.ceo.queue.unshift(job);
       a.status = 'idle';
