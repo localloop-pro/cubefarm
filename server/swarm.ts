@@ -23,6 +23,7 @@ import type {
   AgentLook,
   AgentRole,
   AgentStatus,
+  QaStatus,
   AgentTask,
   AgentView,
   CeoInfo,
@@ -349,6 +350,30 @@ export function schedulerPausedOnStart(stored: unknown, env: Record<string, stri
   return stored === true || env.SWARM_START_PAUSED === '1';
 }
 
+const ROLES: readonly AgentRole[] = ['dev', 'qa', 'ceo'];
+const AGENT_STATUSES: readonly AgentStatus[] = ['idle', 'preparing', 'working', 'done', 'error', 'stopped'];
+const QA_STATUSES: readonly QaStatus[] = ['queued', 'testing', 'passed', 'failed', 'fixing', 'needs-human'];
+
+/**
+ * Values in a loaded state file that this version doesn't know. They are kept as they are (quarantined): the scheduler
+ * only picks known roles and statuses, so these records never get work, and each one gets a diagnostic instead of being
+ * silently coerced. The one known legacy shape, an agent with no role (from before QA testers), is migrated to 'dev'.
+ */
+export function quarantineDiagnostics(state: Pick<Persisted, 'agents' | 'qa'>): { agentId?: string; text: string }[] {
+  const out: { agentId?: string; text: string }[] = [];
+  for (const a of state.agents) {
+    const bad = [
+      !ROLES.includes(a.role) && `role ${JSON.stringify(a.role)}`,
+      !AGENT_STATUSES.includes(a.status) && `status ${JSON.stringify(a.status)}`,
+    ].filter(Boolean);
+    if (bad.length) out.push({ agentId: a.id, text: `⚠ Quarantined: the state file gives ${a.name} an unknown ${bad.join(' and ')}. Kept as is, never scheduled.` });
+  }
+  for (const q of state.qa) {
+    if (!QA_STATUSES.includes(q.status)) out.push({ text: `⚠ Quarantined: QA record for PR #${q.prNumber} has an unknown status ${JSON.stringify(q.status)}. Kept as is, never scheduled.` });
+  }
+  return out;
+}
+
 export class Swarm {
   private state: Persisted = {
     settings: {
@@ -504,6 +529,11 @@ export class Swarm {
       const tail = a.logTail ?? [];
       for (const l of tail) this.logSeq = Math.max(this.logSeq, l.id + 1);
       this.agentRt.set(a.id, { log: tail, pending: [], session: null, currentTool: null, browserUrl: null, screenshot: await loadScreen(a.id), shots: [], terminal: await this.loadTerminal(a.id) });
+    }
+    for (const d of quarantineDiagnostics(this.state)) {
+      console.warn(d.text);
+      const a = d.agentId ? this.state.agents.find((x) => x.id === d.agentId) : undefined;
+      if (a) this.appendLog(a, [{ kind: 'error', text: d.text }]);
     }
     // CLIs the terminal keeper kept running through the restart go back into their terminals, and busy ones carry on.
     // (The CEO's session is resumed instead: its office tools live in this process.)
