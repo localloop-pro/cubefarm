@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { finishListening, keepListening, listen, micProblem, registerTarget, stopListening, useMic, type MicTarget, type MicView } from './mic';
 import { TAP_MS } from './micKeys';
@@ -9,11 +9,11 @@ import { useKeyName } from './controls';
 // box's <form>: sending by hand stops the listening, and V talks while the caret is in that form's box.
 
 /** What the bubble over the 🎙 says. */
-function statusLine(view: MicView, mine: boolean, chiming: boolean): string {
+function statusLine(view: MicView, mine: boolean, chiming: boolean, promptWaiting: boolean): string {
   if (!mine) return chiming ? '🎧 Listening in a moment…' : '';
   if (view.state === 'transcribing') return 'Turning your words into text…';
   if (view.state !== 'listening') return '';
-  if (!view.live) return 'Starting the mic…';
+  if (!view.live) return promptWaiting ? "Waiting for the browser's microphone prompt… (check the address bar)" : 'Starting the mic…';
   if (view.mode === 'handsfree') return '🎧 Listening… just talk';
   return view.mode === 'tap' ? 'Listening… stop talking or tap 🎙️ to finish' : 'Listening… let go to finish';
 }
@@ -37,6 +37,7 @@ export function MicButton({ kind, value, onChange, onSend, disabled }: Props) {
   const mic = useMic();
   const press = useRef<number | null>(null);
   const talkKey = useKeyName('talk');
+  const [, setClock] = useState(0);
 
   useEffect(
     () =>
@@ -63,8 +64,7 @@ export function MicButton({ kind, value, onChange, onSend, disabled }: Props) {
     if (disabled) stopListening(id);
   }, [disabled, id]);
 
-  if (provider === 'off') return null;
-  const why = micProblem();
+  const why = provider === 'off' ? '' : micProblem();
   const mine = mic.target === id;
   const state = mine ? mic.state : 'idle';
   const on = state === 'listening';
@@ -86,7 +86,15 @@ export function MicButton({ kind, value, onChange, onSend, disabled }: Props) {
     else finishListening(id);
   };
 
-  const status = statusLine(mic, mine, chiming);
+  useEffect(() => {
+    if (!warming || !mic.warmingSince) return;
+    const left = Math.max(0, 2000 - (performance.now() - mic.warmingSince));
+    const timer = setTimeout(() => setClock((n) => n + 1), left + 10);
+    return () => clearTimeout(timer);
+  }, [warming, mic.warmingSince]);
+  if (provider === 'off') return null;
+  const promptWaiting = !!mic.warmingSince && performance.now() - mic.warmingSince >= 2000;
+  const status = statusLine(mic, mine, chiming, promptWaiting);
   const title = why || (on ? 'Listening: Esc stops' : `Hold to talk (or hold ${talkKey}); tap to talk until you stop`);
 
   return (

@@ -34,7 +34,10 @@ export function phrasesText(phrases: readonly Phrase[]): { text: string; speakin
  * A recognition or microphone error in one friendly line, or null when it needs none (stopped on purpose, nothing
  * said). Codes are SpeechRecognition's `error` or getUserMedia's DOMException names.
  */
-export function micErrorLine(code: string): string | null {
+export const MIC_SECURE_LINE = '🎙️ The microphone only works on an HTTPS address or on localhost. Open the office as http://localhost:PORT on this Mac, or over HTTPS (Tailscale Serve, see docs/pocket.md).';
+
+export function micErrorLine(code: string, secure = true): string | null {
+  if (!secure && (code === 'TypeError' || code === 'SecurityError' || code === 'not-allowed' || code === 'NotAllowedError')) return MIC_SECURE_LINE;
   switch (code) {
     case 'aborted':
     case 'no-speech':
@@ -61,12 +64,14 @@ export function micErrorLine(code: string): string | null {
 
 /** What this browser can do: recognise speech itself, and record audio for ElevenLabs. */
 export interface MicCaps {
+  secure: boolean;
   recognition: boolean;
   recorder: boolean;
 }
 
 /** Why the 🎙 can't listen here, in one line, or '' when it can. */
 export function cantListen(provider: ListenProvider, caps: MicCaps, keySet: boolean): string {
+  if (provider !== 'off' && !caps.secure) return MIC_SECURE_LINE;
   if (provider === 'browser' && !caps.recognition) return "🎙️ This browser can't turn speech into text. Use Chrome, Edge or Safari, or pick ElevenLabs in Settings → Voice.";
   if (provider === 'elevenlabs' && !caps.recorder) return "🎙️ This browser can't record from a microphone, so ElevenLabs can't hear you. Use a current Chrome, Edge, Firefox or Safari.";
   if (provider === 'elevenlabs' && !keySet) return '🎙️ Add your ElevenLabs API key in Settings → Voice to talk instead of type.';

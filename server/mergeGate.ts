@@ -44,8 +44,7 @@ export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { 
   if (pr.isDraft) return { do: 'wait', note: 'a draft: waiting', set: {} };
   if (!opts.detailed && (pr.mergeable === 'UNKNOWN' || pr.mergeState === 'UNKNOWN')) return { do: 'details', set: {} };
   const set: MergeBookkeeping = {};
-  if (rec.passedSha == null) set.passedSha = pr.headSha; // signed off before the office tracked commits
-  if (pr.headSha !== (set.passedSha ?? rec.passedSha)) return { do: 'requeue', set };
+  if (rec.passedSha == null || pr.headSha !== rec.passedSha) return { do: 'requeue', set };
   const needsHuman = rec.mergeFixes >= MAX_MERGE_FIXES;
   if (pr.mergeable === 'CONFLICTING' || pr.mergeState === 'DIRTY') {
     return { do: 'send-back', reason: 'conflict', instructions: `It conflicts with ${opts.base}.`, needsHuman, set };
@@ -71,6 +70,49 @@ export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { 
   if (pr.mergeState === 'BEHIND') return { do: 'update-branch', set };
   if (rec.mergeRetryAt && now < rec.mergeRetryAt) return { do: 'wait', set };
   return { do: 'merge', set };
+}
+
+// ---------- final gate ----------
+
+/** The QA record as the final gate reads it. `status` is optional until callers pass it; a missing status refuses. */
+export type GateRecord = { status?: string | null; passedSha: string | null };
+
+/** One fresh, complete PR detail. Fields beyond PullInfo's are optional until callers fetch them; missing refuses. */
+export type GatePull = Pick<PullInfo, 'headSha' | 'checks' | 'mergeState'> & {
+  isDraft?: boolean | null;
+  state?: string | null; // OPEN | CLOSED | MERGED
+  reviewDecision?: string | null;
+};
+
+export type GateRefusal =
+  | 'not-passed'
+  | 'no-passed-sha'
+  | 'head-moved'
+  | 'not-open'
+  | 'draft'
+  | 'checks-not-passing'
+  | 'changes-requested'
+  | 'merge-state';
+
+export type GateDecision = { allow: true; sha: string } | { allow: false; reason: GateRefusal; detail?: string };
+
+/**
+ * The last check before a merge, on QA's record and one fresh PR detail. Pure and fail-closed: anything missing or
+ * unexpected refuses. On allow, merge with `--match-head-commit sha` (QA's passed commit, never the PR's head).
+ */
+export function mergeGate(rec: GateRecord, pr: GatePull): GateDecision {
+  if (rec.status !== 'passed') return { allow: false, reason: 'not-passed', detail: String(rec.status ?? 'none') };
+  if (!rec.passedSha) return { allow: false, reason: 'no-passed-sha' };
+  if (!pr.headSha || pr.headSha !== rec.passedSha) return { allow: false, reason: 'head-moved', detail: pr.headSha || 'none' };
+  if (pr.state !== 'OPEN') return { allow: false, reason: 'not-open', detail: String(pr.state ?? 'unknown') };
+  if (pr.isDraft !== false) return { allow: false, reason: 'draft' };
+  if (pr.checks !== 'passing') return { allow: false, reason: 'checks-not-passing', detail: pr.checks };
+  // null is GitHub's "no review decision"; undefined means the caller didn't fetch it, so it refuses
+  if (pr.reviewDecision === undefined || pr.reviewDecision === 'CHANGES_REQUESTED') {
+    return { allow: false, reason: 'changes-requested', detail: pr.reviewDecision ?? 'unknown' };
+  }
+  if (pr.mergeState !== 'CLEAN') return { allow: false, reason: 'merge-state', detail: pr.mergeState || 'unknown' };
+  return { allow: true, sha: rec.passedSha };
 }
 
 /** The GitHub Actions runs behind failed checks (from their log URLs), once each. Other checks can't be re-run from here. */

@@ -235,7 +235,10 @@ function syncGlowLayers(scene: THREE.Scene) {
 export interface Pipeline {
   render(delta: number): void;
   setSize(width: number, height: number): void;
+  /** Frees it and gives the renderer back its clearing and counters as they were when it was made. */
   dispose(): void;
+  /** Frees it, leaving the renderer as it is (someone else draws with it now). */
+  drop(): void;
   stats(): Record<string, unknown>;
 }
 
@@ -284,6 +287,10 @@ export function createPipeline(gl: THREE.WebGLRenderer, scene: THREE.Scene, came
 
   return {
     render(delta) {
+      // Set on every frame, not only when built: a kept pipeline drawing again after Low (Effects.tsx) finds the
+      // renderer as R3F left it, clearing and counting per render, which wipes the passes' work.
+      gl.autoClear = false;
+      gl.info.autoReset = false;
       // Counted across every pass, so ?stats shows what a frame really costs.
       gl.info.reset();
       const now = performance.now();
@@ -308,6 +315,9 @@ export function createPipeline(gl: THREE.WebGLRenderer, scene: THREE.Scene, came
       gl.autoClear = autoClear;
       gl.info.autoReset = autoReset;
       gl.setRenderTarget(null);
+    },
+    drop() {
+      composer.dispose();
     },
     stats() {
       return {

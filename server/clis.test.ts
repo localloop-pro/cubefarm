@@ -2,7 +2,8 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { CODEX_HOOK_EVENTS, codexHookCommand, CROSS_TURN_TOOLS, hookReviewKey, interruptions, launchArgs, oneAtATime, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { boxVersions, CODEX_HOOK_EVENTS, codexHookCommand, CROSS_TURN_TOOLS, hookReviewKey, interruptions, launchArgs, localUrl, oneAtATime, signedOutScreen, trustKey, unwrapCmdShim, type LaunchContext } from './clis.ts';
+import { LOCAL_PROVIDERS } from '../shared/models.ts';
 import { describeOfficeTool, describeTool, newScreenshots, screenshotFile, summariseResult } from './agentRunner.ts';
 
 const dir = path.join(os.tmpdir(), 'npm-global');
@@ -71,6 +72,22 @@ describe('interruptions', () => {
     expect(interruptions(['● Bash(sleep 4)', '  ⎿  Interrupted · What should Claude do instead?', '❯ '].join('\n'))).toBe(1);
     expect(interruptions('■ Conversation interrupted - tell the model what to do differently.\n› ')).toBe(1);
     expect(interruptions('● done\n❯ ')).toBe(0);
+  });
+});
+
+describe('signedOutScreen', () => {
+  it("spots a CLI saying its login is gone, in each CLI's own words", () => {
+    expect(signedOutScreen('⎿  API Error: 401 · Login expired · Please run /login')).toBe(true);
+    expect(signedOutScreen('Not logged in · Please run /login')).toBe(true);
+    expect(signedOutScreen('OAuth token revoked · Please run /login')).toBe(true);
+    expect(signedOutScreen('Failed to authenticate: OAuth session expired and could not be refreshed')).toBe(true);
+    expect(signedOutScreen('■ Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.')).toBe(true);
+    expect(signedOutScreen("Not signed in. Please run 'codex login' to sign in with ChatGPT")).toBe(true);
+  });
+
+  it('leaves ordinary failures alone', () => {
+    expect(signedOutScreen('● The tests fail: expected 401 from /api/login, got 200\n❯ ')).toBe(false);
+    expect(signedOutScreen('Claude Code exited with code 1 before finishing.')).toBe(false);
   });
 });
 
@@ -144,6 +161,35 @@ describe('launchArgs', () => {
     for (const role of ['agent'] as const) expect(config({ role }).permission).toEqual({ edit: 'allow', bash: 'allow', webfetch: 'allow' });
     expect(config({}).autoupdate).toBe(false);
   });
+
+  it('runs Codex on a local model through its own --oss, or a provider of the office\'s', () => {
+    const args = (model: string) => launchArgs('codex', ctx({ model })).args;
+    expect(args('gpt-5.5').join(' ')).toContain('-m gpt-5.5');
+    expect(args('gpt-5.5')).not.toContain('--oss');
+    expect(args('ollama/gpt-oss:20b').join(' ')).toContain('--oss --local-provider ollama -m gpt-oss:20b');
+    const llama = args('llamacpp/default');
+    expect(llama).not.toContain('--oss');
+    expect(llama).toContain('model_providers.cubefarm-llamacpp={name="llama.cpp",base_url="http://127.0.0.1:8080/v1",wire_api="responses"}');
+    expect(llama).toContain('model_provider="cubefarm-llamacpp"');
+    expect(llama.slice(llama.indexOf('-m'), llama.indexOf('-m') + 2)).toEqual(['-m', 'default']);
+  });
+
+  it('gives OpenCode the local server a model runs on', () => {
+    const launch = launchArgs('opencode', ctx({ model: 'llama.cpp/qwen/coder' }));
+    expect(launch.args.slice(launch.args.indexOf('--model'), launch.args.indexOf('--model') + 2)).toEqual(['--model', 'llamacpp/qwen/coder']);
+    expect(JSON.parse(launch.env.OPENCODE_CONFIG_CONTENT).provider).toEqual({
+      llamacpp: { npm: '@ai-sdk/openai-compatible', name: 'llama.cpp', options: { baseURL: 'http://127.0.0.1:8080/v1' }, models: { 'qwen/coder': { name: 'qwen/coder' } } },
+    });
+    expect(JSON.parse(launchArgs('opencode', ctx({ model: 'anthropic/claude-opus-5-5' })).env.OPENCODE_CONFIG_CONTENT).provider).toBeUndefined();
+  });
+});
+
+describe('localUrl', () => {
+  it('takes a local server\'s address from the environment when set', () => {
+    const ollama = LOCAL_PROVIDERS[0];
+    expect(localUrl(ollama, {})).toBe('http://127.0.0.1:11434/v1');
+    expect(localUrl(ollama, { CUBEFARM_OLLAMA_URL: ' http://gpu-box:11434/v1 ' })).toBe('http://gpu-box:11434/v1');
+  });
 });
 
 describe('oneAtATime', () => {
@@ -215,5 +261,14 @@ describe('newScreenshots', () => {
     expect(newScreenshots(dir, seen, later).map((s) => s.name)).toEqual(['page-2026-09-29T10-00-02-000Z.jpeg']);
     expect(newScreenshots(path.join(dir, 'missing'), seen, later)).toEqual([]);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('boxVersions', () => {
+  it("pins cloud agents' Claude Code and Playwright MCP to the office's own versions", () => {
+    const v = boxVersions();
+    expect(v.claude).toMatch(/^\d+\.\d+\.\d+/);
+    expect(v.playwrightMcp).toMatch(/^\d+\.\d+\.\d+/);
+    expect(v.codex).toMatch(/^\d+\.\d+\.\d+/);
   });
 });

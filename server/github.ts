@@ -97,10 +97,15 @@ const failed = (c: Check) => BAD.includes(c.conclusion ?? '') || BAD.includes(c.
 const pending = (c: Check) => (!!c.status && c.status !== 'COMPLETED') || c.state === 'PENDING' || c.state === 'EXPECTED';
 const checkName = (c: Check) => c.name || c.context || 'check';
 
-function checksOf(rollup: RawPull['statusCheckRollup']): PullInfo['checks'] {
+const SKIPPED = ['NEUTRAL', 'SKIPPED'];
+const skipped = (c: Check) => SKIPPED.includes(c.conclusion ?? '') || SKIPPED.includes(c.state ?? '');
+
+/** The head commit's checks in one word. No checks, or only neutral/skipped ones, is `none`: nothing passed. */
+export function checksOf(rollup: RawPull['statusCheckRollup']): PullInfo['checks'] {
   if (!rollup || rollup.length === 0) return 'none';
   if (rollup.some(failed)) return 'failing';
   if (rollup.some(pending)) return 'pending';
+  if (rollup.every(skipped)) return 'none';
   return 'passing';
 }
 
@@ -254,25 +259,38 @@ export interface PrDetails {
   checkNames: string[]; // every check on the head commit, once each
   failedChecks: string[];
   pendingChecks: string[];
+  isDraft: boolean;
+  reviewDecision: string | null;
 }
 
 const uniqueNames = (checks: Check[]) => [...new Set(checks.map(checkName))];
 
+export interface RawPrDetails {
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  headRefName: string;
+  headRefOid: string;
+  isCrossRepository: boolean;
+  closingIssuesReferences: { number: number }[] | null;
+  state: PrDetails['state'];
+  mergeable: string;
+  mergeStateStatus: string;
+  statusCheckRollup: RawPull['statusCheckRollup'];
+  isDraft: boolean;
+  reviewDecision: string | null;
+}
+
+const PR_DETAIL_FIELDS =
+  'number,title,body,url,headRefName,headRefOid,isCrossRepository,closingIssuesReferences,state,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup';
+
+/** A PR's state, review, head commit, mergeability and checks, all from one `gh pr view`. */
 export async function prDetails(fullName: string, number: number): Promise<PrDetails> {
-  const raw = await ghJson<{
-    number: number;
-    title: string;
-    body: string;
-    url: string;
-    headRefName: string;
-    headRefOid: string;
-    isCrossRepository: boolean;
-    closingIssuesReferences: { number: number }[] | null;
-    state: PrDetails['state'];
-    mergeable: string;
-    mergeStateStatus: string;
-    statusCheckRollup: RawPull['statusCheckRollup'];
-  }>(['pr', 'view', String(number), '-R', fullName, '--json', 'number,title,body,url,headRefName,headRefOid,isCrossRepository,closingIssuesReferences,state,mergeable,mergeStateStatus,statusCheckRollup']);
+  return toPrDetails(await ghJson<RawPrDetails>(['pr', 'view', String(number), '-R', fullName, '--json', PR_DETAIL_FIELDS]));
+}
+
+export function toPrDetails(raw: RawPrDetails): PrDetails {
   const rollup = raw.statusCheckRollup ?? [];
   return {
     number: raw.number,
@@ -284,6 +302,8 @@ export async function prDetails(fullName: string, number: number): Promise<PrDet
     isCrossRepository: raw.isCrossRepository,
     closesIssues: (raw.closingIssuesReferences ?? []).map((r) => r.number),
     state: raw.state,
+    isDraft: raw.isDraft,
+    reviewDecision: raw.reviewDecision || null,
     mergeable: raw.mergeable,
     mergeState: raw.mergeStateStatus || 'UNKNOWN',
     checks: checksOf(rollup),

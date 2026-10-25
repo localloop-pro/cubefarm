@@ -67,18 +67,26 @@ describe('micErrorLine', () => {
 });
 
 describe('cantListen', () => {
-  const all = { recognition: true, recorder: true };
+  const all = { secure: true, recognition: true, recorder: true };
   it('is happy where the provider works', () => {
     expect(cantListen('browser', all, false)).toBe('');
     expect(cantListen('elevenlabs', all, true)).toBe('');
   });
 
   it("says plainly when the browser can't recognise speech", () => {
-    expect(cantListen('browser', { recognition: false, recorder: true }, true)).toMatch(/can't turn speech into text/);
+    expect(cantListen('browser', { secure: true, recognition: false, recorder: true }, true)).toMatch(/can't turn speech into text/);
   });
 
   it('ElevenLabs needs a recorder and a key', () => {
-    expect(cantListen('elevenlabs', { recognition: true, recorder: false }, true)).toMatch(/can't record/);
+    expect(cantListen('elevenlabs', { secure: true, recognition: true, recorder: false }, true)).toMatch(/can't record/);
     expect(cantListen('elevenlabs', all, false)).toMatch(/Add your ElevenLabs API key/);
+  });
+
+  it('refuses every listening provider on an insecure page', () => {
+    const insecure = { secure: false, recognition: true, recorder: true };
+    expect(cantListen('browser', insecure, true)).toMatch(/HTTPS address or on localhost/);
+    expect(cantListen('elevenlabs', insecure, true)).toMatch(/HTTPS address or on localhost/);
+    expect(micErrorLine('TypeError', false)).toBe(cantListen('browser', insecure, true));
+    expect(micErrorLine('not-allowed', false)).toBe(cantListen('browser', insecure, true));
   });
 });

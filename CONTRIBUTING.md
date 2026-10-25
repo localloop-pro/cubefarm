@@ -2,6 +2,8 @@
 
 How to run cubefarm from source, test it and publish it. Agent sessions working on this repo also follow [CLAUDE.md](CLAUDE.md).
 
+For UI pull requests, use the [before/after evidence guide](docs/visual-evidence.md) alongside the normal QA report.
+
 ## Run it from source
 
 ```bash

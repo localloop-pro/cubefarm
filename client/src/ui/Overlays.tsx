@@ -20,6 +20,7 @@ import type { DayMode } from '../world/sky/time';
 import { setDayMode, useDayTime } from '../world/sky/useDayTime';
 import { GRAPHICS_PRESETS, type GraphicsPreset } from '../world/gfx/quality';
 import { effectiveTier, setGraphicsPreset, useGfx } from '../world/gfx/useGraphics';
+import { hitchSummary, performanceReport } from '../hitches';
 import { setReplay, usePhotoGate } from '../photo/gate';
 
 export { closeOverlay, Panel } from './Panel';
@@ -141,7 +142,29 @@ function GraphicsSettings() {
       ) : (
         preset === 'auto' && <span className="muted small">now {GRAPHICS_LABELS[tier]}</span>
       )}
+      <PerformanceReportButton />
     </div>
+  );
+}
+
+/** Copies the hitch recorder's report (hitches.ts): what stalled lately and what was going on, to paste into an issue. */
+function PerformanceReportButton() {
+  const pushToast = useStore((s) => s.pushToast);
+  const copy = () => {
+    const text = performanceReport();
+    const n = hitchSummary().frames;
+    navigator.clipboard
+      .writeText(text)
+      .then(() => pushToast('success', `📋 Performance report copied (${n ? `${n} hitch${n > 1 ? 'es' : ''}` : 'no hitches'} lately)`))
+      .catch(() => {
+        console.info(text);
+        pushToast('error', "Couldn't reach the clipboard: the report is in the browser console");
+      });
+  };
+  return (
+    <button className="btn btn-small" onClick={copy} title="What stalled lately (slow frames, pauses, lost keys) and what was going on, to paste into an issue">
+      Copy performance report
+    </button>
   );
 }
 
@@ -226,6 +249,13 @@ function Help({ tab: initial }: { tab?: HelpTab }) {
             With coffee in hand, <Key action="interact" /> takes a sip wherever you're looking (except at the machine). A full mug is three sips: the last is one big gulp, and then you drop the empty mug.{' '}
             <Key action="drop" /> drops your mug at any time, and mugs can't be thrown. Aim at a dropped mug and press <Key action="interact" /> to pick it up again, coffee and all. Any mug that isn't full can go back under
             the machine for a refill.
+          </p>
+          <h3>The fridge</h3>
+          <p>
+            The fridge at the kitchenette's far end: aim at it and press <Key action="interact" /> to open it (the light comes on), and again to shut it; it also shuts by itself a few seconds after
+            everyone has walked away, and beeps if it's left open. With the door open, aim at a snack and press <Key action="interact" /> to grab it: an energy drink, sparkling water, cold brew, a mate
+            soda, cold pizza, a protein bar, string cheese or a chocolate bar. Then <Key action="interact" /> has a sip or a bite until it's gone, and <Key action="drop" /> gets rid of it. Each floor's
+            fridge restocks one item every few minutes, and the agents raid it on their breaks too. The dog begs when you hold food. Leave the labelled tupperware alone.
           </p>
           <h3>Sound</h3>
           <p>
