@@ -593,7 +593,7 @@ export class Swarm {
         this.clearTask(a);
         continue;
       }
-      if (this.slotsFull()) continue; // stays 'stopped'; the manager can resume it later
+      if (this.paused() || this.slotsFull()) continue; // stays 'stopped'; the manager can resume it later
       void this.message(a.id, 'The office server restarted while you were working. Check the state of your worktree and continue where you left off.').catch((err) =>
         console.warn(`could not resume ${a.name}`, err),
       );
@@ -822,6 +822,18 @@ export class Swarm {
     return `${slugify(a.name)}-${a.id.slice(0, 4)}`;
   }
 
+  /** The manager paused the scheduler: nothing autonomous starts, retries or merges. */
+  private paused(): boolean {
+    return this.state.settings.schedulerPaused === true;
+  }
+
+  /** Work whose desk was prepared when a pause landed: nothing launches, the desk is kept for later. */
+  private holdForPause(a: PersistedAgent) {
+    this.appendLog(a, [{ kind: 'system', text: '⏸ The scheduler was paused while preparing; nothing started.' }]);
+    this.clearTask(a);
+    this.save();
+  }
+
   private clearTask(a: PersistedAgent) {
     Object.assign(a, { status: 'idle', task: null, issueNumber: null, issueTitle: null, branch: null, prNumber: null, prUrl: null, lastError: null });
     this.emitAgent(a);
@@ -986,7 +998,7 @@ export class Swarm {
    */
   private async advanceMerges(repo: PersistedRepo) {
     const rt = this.repoRt.get(repo.id);
-    if (!rt || !repo.autoMerge || rt.merging) return;
+    if (!rt || !repo.autoMerge || rt.merging || this.paused()) return;
     rt.merging = true;
     let merged = false;
     try {
@@ -1014,6 +1026,7 @@ export class Swarm {
   /** One step toward merging a QA-passed PR. Returns true when it merged. */
   private async advanceMerge(repo: PersistedRepo, rec: QaRecord, pr: PullInfo): Promise<boolean> {
     const step = await freshMergeStep(this.backend, repo.fullName, pr.number, rec, repo.defaultBranch, pr);
+    if (this.paused()) return false; // paused while fetching: nothing merges, updates or moves
     Object.assign(rec, step.set);
     if (step.do === 'requeue') {
       // Commits arrived after QA's sign-off: they get tested too.
@@ -1606,6 +1619,7 @@ export class Swarm {
     );
     const cwd = await this.prepare(a, repo, {}, branch);
     if (!cwd) return;
+    if (this.paused()) return this.holdForPause(a); // the issue goes back on the board; the desk stays
 
     const prompt = [
       `Please resolve GitHub issue #${issue.number}: ${issue.title}`,
@@ -1758,6 +1772,7 @@ export class Swarm {
    */
   private noPullRequest(a: PersistedAgent, repo: PersistedRepo) {
     const key = `${repo.id}#${a.issueNumber}`;
+    if (this.paused()) return; // no nudge while paused; the issue stays with its developer
     if (this.nudged.has(key)) return this.releaseIssue(a, repo);
     this.nudged.add(key);
     // message() starts the session before its first await, so the scheduler can't hand this developer other work first.
@@ -1895,6 +1910,10 @@ export class Swarm {
     if (!cwd) {
       if (this.state.qa.includes(rec) && rec.status === 'testing') this.setQa(rec, { status: 'queued', qaAgentId: null });
       return;
+    }
+    if (this.paused()) {
+      if (this.state.qa.includes(rec) && rec.status === 'testing') this.setQa(rec, { status: 'queued', qaAgentId: null });
+      return this.holdForPause(a);
     }
 
     const dev = rec.devAgentId ? this.state.agents.find((x) => x.id === rec.devAgentId) : null;
@@ -2038,6 +2057,10 @@ export class Swarm {
     if (!cwd) {
       if (rec.status === 'fixing') this.setQa(rec, { status: 'failed' });
       return;
+    }
+    if (this.paused()) {
+      if (rec.status === 'fixing') this.setQa(rec, { status: 'failed' });
+      return this.holdForPause(dev);
     }
     const failed = rec.checks.filter((c) => c.result === 'fail');
     const takeover = original ? '' : ' A teammate wrote it, so read the PR and the linked issue first.';
@@ -2354,7 +2377,7 @@ export class Swarm {
   private schedule() {
     this.tickUsage();
     if (this.officeUpdateTick()) return; // draining for the office's own update
-    if (this.limited()) return;
+    if (this.limited() || this.paused()) return; // paused: running sessions go on, nothing new starts
     // Management first: the CEO's jobs are short and shape everyone else's work.
     this.maybeHeartbeat();
     this.startCeoWork();
@@ -2607,7 +2630,7 @@ export class Swarm {
     const a = this.state.agents.find((x) => x.id === CEO_ID);
     const c = this.state.ceo;
     if (!a || BUSY.includes(a.status) || c.job || c.queue.length === 0) return;
-    if (this.slotsFull()) return;
+    if (this.paused() || this.slotsFull()) return;
     const rank: Record<CeoJob['kind'], number> = { chat: 0, onboard: 1, plan: 1, review: 2 };
     // A floor's jobs wait for its clone and first sync, so the CEO has something to read.
     const ready = (j: CeoJob) => {
@@ -2648,6 +2671,13 @@ export class Swarm {
     this.emitCeo();
     this.save();
     await fs.mkdir(CEO_DIR, { recursive: true }).catch(() => undefined);
+    if (a.status === 'working' && this.paused()) {
+      // paused while preparing: the job waits at the front of the queue
+      this.state.ceo.queue.unshift(job);
+      a.status = 'idle';
+      this.appendLog(a, [{ kind: 'system', text: '⏸ The scheduler is paused; this waits in the queue.' }]);
+      this.emitAgent(a);
+    }
     if (a.status !== 'working') {
       // stopped before the session started
       this.state.ceo.job = null;
