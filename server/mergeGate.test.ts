@@ -27,7 +27,7 @@ const record = (r: Partial<MergeRecord> = {}): MergeRecord => ({
 describe('mergeStep', () => {
   it('merges a clean, green PR at the commit QA passed', () => {
     expect(mergeStep(pull(), record(), NOW, base)).toEqual({ do: 'merge', set: { pendingSince: null } });
-    expect(mergeStep(pull({ checks: 'none' }), record(), NOW, base).do).toBe('merge');
+    expect(mergeStep(pull({ checks: 'none' }), record(), NOW, base).do).toBe('wait'); // no passing CI: never merges
   });
 
   it('waits on a draft without touching the record', () => {
@@ -67,11 +67,8 @@ describe('mergeStep', () => {
       expect(mergeStep(pull({ headSha: 'new456', mergeable: 'CONFLICTING', checks: 'failing' }), record(), NOW, base).do).toBe('requeue');
     });
 
-    it('adopts the head as the passed commit for records from before commits were tracked', () => {
-      expect(mergeStep(pull({ headSha: 'def789' }), record({ passedSha: null }), NOW, base)).toEqual({
-        do: 'merge',
-        set: { passedSha: 'def789', pendingSince: null },
-      });
+    it('requeues records without a passed commit instead of adopting the head', () => {
+      expect(mergeStep(pull({ headSha: 'def789' }), record({ passedSha: null }), NOW, base)).toEqual({ do: 'requeue', set: {} });
     });
   });
 
