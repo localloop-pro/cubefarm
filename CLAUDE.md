@@ -59,7 +59,7 @@ browser with the Playwright tools, and put screenshots in the PR. `.github/workf
 
 Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bundles it into `dist-server/` for npm):
 - `index.ts`: entry; picks the real or demo backend, REST routes under `/api`, the `/ws` and `/ws/term` websockets, serves `dist/`, shutdown.
-- `config.ts`: `SWARM_PORT` (default 4317), `SWARM_HOME` (default `~/.cubefarm`), `--demo`, state file, intervals,
+- `config.ts`: `SWARM_PORT` (default 4317), `SWARM_HOST` (default 127.0.0.1; `npx cubefarm --host`), `SWARM_HOME` (default `~/.cubefarm`), `--demo`, state file, intervals,
   the default projects folder.
 - `swarm.ts`: the orchestrator. Floors, agents, scheduling/auto-assign, build → QA → fix → merge loop, team changes
   (the CEO's `scale_team`, lobby approvals), CEO job queue, phone messages, persistence (`state.json` / `demo-state.json`), websocket fan-out (through
@@ -86,7 +86,17 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
   triage), `scalePlan` (team-size arithmetic), `ceoSystemPrompt`, `ceoJobPrompt`.
 - `backend.ts`: the `Backend` interface (everything touching GitHub, git, disk and sessions) and `realBackend`.
 - `machines.ts`: agents' machines, `MachineProvider`: each agent's own clone, worktree and temp folder (the local
-  provider is folders under `<SWARM_HOME>/machines/<machine>/`, in `workspace.ts`; containers and cloud VMs come later).
+  provider is folders under `<SWARM_HOME>/machines/<machine>/`, in `workspace.ts`; cloud agents' are Upstash Boxes).
+- Cloud agents (docs/cloud.md, opt-in; `PersistedAgent.host === 'box'`): `cloud.ts` is the account (the Upstash key and
+  pasted keys in `secrets.json`, `CUBEFARM_CLAUDE_TOKEN` read from the environment and never saved, credential
+  resolution, `CloudView`); `box.ts` the only importer of `@upstash/box` (`BoxApi`, which the demo fakes);
+  `boxMachines.ts` the Box `MachineProvider` (create, set up, prepare, pause, leftovers); `boxScripts.ts` the shell
+  scripts run in a Box (pure, tested); `boxHelpers.ts` the programs put in a Box (launcher, hooks writing to the
+  session's `events.jsonl`); `boxCli.ts` `BoxPty` (the CLI under tmux, its events read from a byte offset, reattached
+  after drops and restarts). Credentials only ever travel as one Box command's environment. Without a key for its CLI,
+  a cloud agent's CLI uses its own login in the Box: `Swarm`'s sign-in checks it before each task (`needsSignIn`
+  holds the task) and runs the CLI's own login in their terminal (`cliRunner.ts` `startBoxSignIn`); the office never
+  reads that login.
 - `demo.ts`: `createDemoBackend()`: fake GitHub, fake sessions (drawn into the agent's terminal in the terminal runtime), fake previews and machines for `--demo`;
   `--floors N --agents N` (or `SWARM_DEMO_FLOORS` / `SWARM_DEMO_AGENTS`) makes it a big company for scale tests.
 - `github.ts`: all GitHub access through the `gh` CLI.
@@ -96,6 +106,8 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
 - `exec.ts`: `run` / `git` / `gh`: `execFile` without a shell, prompts disabled, `CommandError` with stderr.
 - `previews.ts`: one preview per floor: ports (6300 + floor), statuses, config validation; and the PR theatre's PR
   previews (`prTheatre.ts`: their slots, ports, eviction and idle stop, pure; `syncProxy.ts`: compare mode's synced scrolling).
+  `previewGateway.ts`: previews through the office's own address at `/preview/<port>/` for other devices, with a
+  service worker keeping the apps' root paths under it.
 - `qaShots.ts`: QA's screenshots of each PR's latest round, kept for the app viewer's QA panel.
 - `previewRunner.ts`: checks out, installs and runs a floor's app in its preview worktree; kills the process tree.
 - `httpError.ts`: `HttpError(status, message)`.
@@ -210,4 +222,5 @@ Client (`client/`, Vite root; React 19, R3F, drei, zustand):
   changing, and don't touch unrelated files.
 - Before opening it: `typecheck`, `test` and `build`. `test:e2e` only when an issue asks for it; CI doesn't run it.
 - Say how you verified it and list your assumptions. UI changes get screenshots from the demo office.
+- For UI changes, follow [the before/after evidence guide](docs/visual-evidence.md): compare the same state and viewport, protect private data, and label any missing or inconclusive evidence. The office's QA screenshot upload remains the default.
 - Never push to `main`, never force-push, never merge your own PR.

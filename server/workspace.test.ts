@@ -8,20 +8,23 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 // "upstream" clone that pushes new work. Everything lives in one temp folder whose path has spaces in it.
 
 const npmRuns = vi.hoisted(() => [] as { cmd: string; cwd?: string }[]);
+// Simulated recovery-ref failures: 'create' fails making the ref, 'verify' reads it back as another commit.
+const recoveryFault = vi.hoisted(() => ({ mode: null as null | 'create' | 'verify' }));
 
 // npm install is stubbed: only what it was asked to do is recorded. git still runs for real.
 vi.mock('./exec.ts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./exec.ts')>();
-  return {
-    ...actual,
-    run: (cmd: string, args: string[], opts?: { cwd?: string; timeoutMs?: number }) => {
+  const run = (cmd: string, args: string[], opts?: { cwd?: string; timeoutMs?: number }) => {
       if (cmd === 'npm' || (cmd === 'cmd.exe' && args.join(' ').includes('npm install'))) {
         npmRuns.push({ cmd, cwd: opts?.cwd });
         return Promise.resolve('');
       }
-      return actual.run(cmd, args, opts);
-    },
+      const recovery = cmd === 'git' && args.some((a) => a.includes('refs/cubefarm-recovery/'));
+      if (recovery && recoveryFault.mode === 'create' && (args[0] === 'update-ref' || args[0] === 'push')) return Promise.reject(new Error('simulated ref failure'));
+      if (recovery && recoveryFault.mode === 'verify' && args[0] === 'rev-parse') return Promise.resolve('0'.repeat(40));
+    return actual.run(cmd, args, opts);
   };
+  return { ...actual, run, git: (args: string[], opts?: { cwd?: string; timeoutMs?: number }) => run('git', args, opts) };
 });
 
 const savedEnv = { SWARM_HOME: process.env.SWARM_HOME, GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL };
@@ -35,7 +38,7 @@ process.env.GIT_CONFIG_GLOBAL = gitConfig;
 
 const { git } = await import('./exec.ts');
 const { HOME_DIR, WORKSPACE_ROOT } = await import('./config.ts');
-const { branchHolder, deskDir, fileList, leftoversInDesk, listMachines, machineDesk, mainDir, overwrittenPaths, parseWorktrees, planSweep, porcelainPaths, prepareDesk, prepareMachineDesk, removeDesk, removeMachine, setLocalPath, sweepDesks, sweepMachine, syncMain: sync, trimDesk } =
+const { RECOVERY_NS, branchHolder, deskDir, fileList, leftoversInDesk, listMachines, machineDesk, mainDir, overwrittenPaths, parseWorktrees, planSweep, porcelainPaths, prepareDesk, prepareMachineDesk, removeDesk, removeMachine, setLocalPath, sweepDesks, sweepMachine, syncMain: sync, trimDesk } =
   await import('./workspace.ts');
 // Most tests only care about the status line.
 const syncMain = async (...args: Parameters<typeof sync>) => (await sync(...args))?.status ?? null;
@@ -386,7 +389,7 @@ describe('prepareDesk', { timeout: 60_000 }, () => {
     expect(notes).toEqual([expect.stringMatching(/^Removed a stale git lock/)]);
   });
 
-  it("says why it couldn't reuse a desk, and still refuses one whose files can't be removed", async () => {
+  it("refuses a desk it can't read, before trying to reuse or remove it", async () => {
     const r = await makeRepos();
     const desk = await prepareDesk(r.fullName, { defaultBranch: 'main' }, 'ada-01df', 'swarm/issue-108-ada');
     // Reuse fails: the desk's .git points nowhere. (Replaced, not overwritten: git marks it hidden on Windows.)
@@ -394,10 +397,11 @@ describe('prepareDesk', { timeout: 60_000 }, () => {
     await fs.writeFile(path.join(desk, '.git'), `gitdir: ${path.join(ROOT, 'nowhere')}\n`);
     lockFolder(desk, { emptiesIt: false });
     const notes: string[] = [];
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     await expect(prepareDesk(r.fullName, { defaultBranch: 'main' }, 'ada-01df', 'swarm/issue-109-ada', (t) => notes.push(t))).rejects.toThrow(
-      /^Could not clear the desk folder .*EBUSY.*A program started by the previous task is probably still running there\. Close it and try again\.$/,
+      /^Could not read the worktree .*, so it is left as it is/,
     );
-    expect(notes).toEqual([expect.stringMatching(/^Couldn't reuse the desk in place, so it's rebuilt: /)]);
+    expect(notes).toEqual([]);
     expect(await fs.readFile(path.join(desk, 'README.md'), 'utf8')).toMatch(/^# Test/);
   });
 
@@ -600,10 +604,12 @@ describe('sweepDesks', { timeout: 120_000 }, () => {
     const base = { defaultBranch: 'main' };
     const ada = await prepareDesk(r.fullName, base, 'ada-1234', 'swarm/issue-9-ada'); // a current agent
     const bob = await prepareDesk(r.fullName, base, 'bob-5678', 'swarm/issue-5-bob'); // left long ago
-    await fs.writeFile(path.join(bob, 'scratch.txt'), 'untracked notes\n'); // untracked only: nothing to save
-    const dan = await prepareDesk(r.fullName, base, 'dan-9999', 'swarm/issue-7-dan'); // left with work on no remote branch
+    await fs.writeFile(path.join(bob, 'scratch.txt'), 'untracked notes\n'); // untracked changes: left alone
+    const dan = await prepareDesk(r.fullName, base, 'dan-9999', 'swarm/issue-7-dan'); // left with a commit on no remote branch
     await commitFile(dan, path.join('src', 'feature.ts'), 'export const x = 1;\n\n');
-    await fs.writeFile(path.join(dan, 'README.md'), '# Test\n\nUnfinished docs\n');
+    const danHead = await head(dan);
+    const fay = await prepareDesk(r.fullName, base, 'fay-2222', 'swarm/issue-8-fay'); // tracked changes: left alone
+    await fs.writeFile(path.join(fay, 'README.md'), '# Test\n\nUnfinished docs\n');
     // A desk from before the rename, under the old home.
     const oldDesk = path.join(ROOT, 'old home', '.office-swarm', 'workspaces', r.fullName.replace('/', '__'), 'desks', 'cara-0001');
     await git(['worktree', 'add', '-q', '-b', 'swarm/issue-6-cara', oldDesk, 'origin/main'], { cwd: r.dir });
@@ -619,15 +625,20 @@ describe('sweepDesks', { timeout: 120_000 }, () => {
 
     // swarm/issue-4-open is an open PR's head.
     const keep = { desks: ['ada-1234', 'eve-0000', 'preview'], branches: ['swarm/issue-9-ada', 'swarm/issue-4-open'] };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const result = await sweepDesks(r.fullName, keep);
+    warn.mockRestore();
 
-    expect(result).toMatchObject({ desks: 3, folders: 1, branches: 5, skipped: [] });
-    expect(await worktreesOf(r.dir)).toEqual(await reals([r.dir, ada, mine]));
-    for (const gone of [bob, dan, oldDesk, path.join(desks, 'stray')]) expect(await isDir(gone)).toBe(false);
-    for (const kept of [ada, mine, path.join(desks, 'eve-0000')]) expect(await isDir(kept)).toBe(true);
-    expect(await branchesOf(r.dir)).toEqual(['feature/mine', 'fix/my-work', 'main', 'swarm/issue-4-open', 'swarm/issue-9-ada']);
+    expect(result).toMatchObject({ desks: 2, folders: 1, branches: 4, skipped: await reals([bob, fay]) });
+    expect(await worktreesOf(r.dir)).toEqual(await reals([r.dir, ada, mine, bob, fay]));
+    for (const gone of [dan, oldDesk, path.join(desks, 'stray')]) expect(await isDir(gone)).toBe(false);
+    for (const kept of [ada, mine, bob, fay, path.join(desks, 'eve-0000')]) expect(await isDir(kept)).toBe(true);
+    expect(await fs.readFile(path.join(bob, 'scratch.txt'), 'utf8')).toBe('untracked notes\n');
+    expect(await branchesOf(r.dir)).toEqual(['feature/mine', 'fix/my-work', 'main', 'swarm/issue-4-open', 'swarm/issue-5-bob', 'swarm/issue-8-fay', 'swarm/issue-9-ada']);
+    // Dan's commit stays reachable from a recovery ref after his desk and branch are gone.
+    expect((await git(['for-each-ref', '--format=%(objectname)', RECOVERY_NS], { cwd: r.dir })).split(/\r?\n/)).toContain(danHead);
 
-    // Dan's commit and uncommitted change are in one patch that applies cleanly where Dan started from.
+    // Dan's commit is in a patch that applies cleanly where Dan started from.
     const d = new Date();
     const day = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
     expect(result.patches).toEqual([path.join(HOME_DIR, 'leftovers', r.fullName.replace('/', '__'), `dan-9999-${day}.patch`)]);
@@ -635,11 +646,12 @@ describe('sweepDesks', { timeout: 120_000 }, () => {
     await git(['apply', result.patches[0]], { cwd: r.upstream });
     const text = async (...p: string[]) => (await fs.readFile(path.join(r.upstream, ...p), 'utf8')).replaceAll('\r\n', '\n'); // a system autocrlf may apply
     expect(await text('src', 'feature.ts')).toBe('export const x = 1;\n\n');
-    expect(await text('README.md')).toBe('# Test\n\nUnfinished docs\n');
 
-    // Nothing left to do the second time.
-    expect(await sweepDesks(r.fullName, keep)).toEqual(nothing);
-    expect(await branchesOf(r.dir)).toHaveLength(5);
+    // Only the desks with changes are left the second time.
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect(await sweepDesks(r.fullName, keep)).toEqual({ ...nothing, skipped: await reals([bob, fay]) });
+    vi.restoreAllMocks();
+    expect(await branchesOf(r.dir)).toHaveLength(7);
   });
 
   it.runIf(process.platform === 'win32')('skips a desk some process still works in, and removes it on a later sweep', async () => {
@@ -753,5 +765,131 @@ describe("agents' machines", { timeout: 60_000 }, () => {
     expect(await fs.readFile(gone.patches[0], 'utf8')).toContain('unpushed.txt');
     expect(await isDir(path.dirname(path.dirname(desk)))).toBe(false);
     expect(await removeMachine('ada00005')).toEqual({ removed: true, patches: [] });
+  });
+});
+
+describe('preservation', { timeout: 120_000 }, () => {
+  const base = { defaultBranch: 'main' };
+  const branchOf = (cwd: string) => git(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd });
+  const isDir = (p: string) => fs.stat(p).then((st) => st.isDirectory(), () => false);
+  const recovered = async (cwd: string) => (await git(['for-each-ref', '--format=%(objectname)', RECOVERY_NS], { cwd })).split(/\r?\n/).filter(Boolean);
+  const branchesOf = async (cwd: string) => (await git(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], { cwd })).split(/\r?\n/).filter(Boolean);
+  const blockRecovery = (_repo?: string, mode: 'create' | 'verify' = 'create') => {
+    recoveryFault.mode = mode;
+  };
+  const unblockRecovery = (_repo?: string) => {
+    recoveryFault.mode = null;
+  };
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    recoveryFault.mode = null;
+    vi.restoreAllMocks();
+  });
+
+  for (const [what, change] of [
+    ['tracked', (desk: string) => fs.writeFile(path.join(desk, 'README.md'), '# Test\nwork in progress\n')],
+    ['untracked', (desk: string) => fs.writeFile(path.join(desk, 'new-idea.txt'), 'not added yet\n')],
+  ] as const) {
+    it(`refuses to reuse, rebuild or remove a desk with ${what} changes`, async () => {
+      const r = await makeRepos();
+      const desk = await prepareDesk(r.fullName, base, 'ada-0001', 'swarm/issue-1-ada');
+      await commitFile(desk, 'mine.txt', 'unpushed\n');
+      const before = await head(desk);
+      await change(desk);
+      const status = await git(['status', '--porcelain', '--untracked-files=all'], { cwd: desk });
+      await expect(prepareDesk(r.fullName, base, 'ada-0001', 'swarm/issue-2-ada')).rejects.toThrow(/has uncommitted changes .*left as it is/);
+      await expect(removeDesk(r.fullName, 'ada-0001')).rejects.toThrow(/has uncommitted changes/);
+      expect(await branchOf(desk)).toBe('swarm/issue-1-ada');
+      expect(await head(desk)).toBe(before);
+      expect(await git(['status', '--porcelain', '--untracked-files=all'], { cwd: desk })).toBe(status);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('has uncommitted changes'));
+    });
+  }
+
+  it('keeps a clean divergent branch in a verified recovery ref before reusing the desk', async () => {
+    const r = await makeRepos();
+    const desk = await prepareDesk(r.fullName, base, 'ada-0002', 'swarm/issue-1-ada');
+    await commitFile(desk, 'mine.txt', 'unpushed\n');
+    const before = await head(desk);
+    expect(await prepareDesk(r.fullName, base, 'ada-0002', 'swarm/issue-2-ada')).toBe(desk);
+    expect(await head(desk)).toBe(await originMain(r.dir));
+    expect(await recovered(r.dir)).toEqual([before]);
+    // Nothing new the second time: a pushed or already-kept commit needs no ref.
+    await prepareDesk(r.fullName, base, 'ada-0002', 'swarm/issue-3-ada');
+    expect(await recovered(r.dir)).toEqual([before]);
+  });
+
+  it('keeps an unpushed detached commit, and the old tip of a branch it resets', async () => {
+    const r = await makeRepos();
+    const desk = await prepareDesk(r.fullName, base, 'ada-0003', 'swarm/issue-1-ada');
+    await git(['checkout', '-q', '--detach'], { cwd: desk });
+    await commitFile(desk, 'detached.txt', 'unpushed\n');
+    const detached = await head(desk);
+    // An earlier swarm/issue-9-ada with unpushed work, checked out nowhere: -B would move it.
+    await git(['branch', 'swarm/issue-9-ada', detached], { cwd: r.dir });
+    await commitFile(r.upstream, 'x.txt', 'x\n');
+    await git(['push', '-q', 'origin', 'main'], { cwd: r.upstream });
+    await prepareDesk(r.fullName, base, 'ada-0003', 'swarm/issue-9-ada');
+    expect(await head(desk)).toBe(await git(['rev-parse', 'main'], { cwd: r.upstream }));
+    expect(await recovered(r.dir)).toEqual([detached]);
+  });
+
+  for (const fault of ['create', 'verify'] as const) {
+    it(`refuses, and never falls through to a rebuild, when the recovery ref fails to ${fault}`, async () => {
+      const r = await makeRepos();
+      const desk = await prepareDesk(r.fullName, base, 'ada-0004', 'swarm/issue-1-ada');
+      await commitFile(desk, 'mine.txt', 'unpushed\n');
+      const before = await head(desk);
+      blockRecovery(r.dir, fault);
+      await expect(prepareDesk(r.fullName, base, 'ada-0004', 'swarm/issue-2-ada')).rejects.toThrow(/Could not keep commit .* in a recovery ref/);
+      await expect(removeDesk(r.fullName, 'ada-0004')).rejects.toThrow(/Could not keep commit/);
+      expect(await branchOf(desk)).toBe('swarm/issue-1-ada');
+      expect(await head(desk)).toBe(before);
+      unblockRecovery(r.dir);
+      await removeDesk(r.fullName, 'ada-0004');
+      expect(await isDir(desk)).toBe(false);
+      expect(await recovered(r.dir)).toEqual([before]);
+    });
+  }
+
+  it('sweeps a finished branch with an unpushed tip only once a recovery ref keeps it, and logs the ones it skips', async () => {
+    const r = await makeRepos([], true);
+    await git(['branch', 'swarm/issue-3-old', 'origin/main'], { cwd: r.dir });
+    await git(['checkout', '-q', '-b', 'swarm/issue-4-old'], { cwd: r.upstream });
+    await commitFile(r.upstream, 'old.txt', 'never pushed\n');
+    const tip = await head(r.upstream);
+    await git(['fetch', '-q', r.upstream, 'swarm/issue-4-old:swarm/issue-4-old'], { cwd: r.dir });
+    blockRecovery(r.dir);
+    expect(await sweepDesks(r.fullName, { desks: [], branches: [] })).toMatchObject({ branches: 1 });
+    expect(await branchesOf(r.dir)).toContain('swarm/issue-4-old');
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/Skipped deleting branch swarm\/issue-4-old/));
+    unblockRecovery(r.dir);
+    expect(await sweepDesks(r.fullName, { desks: [], branches: [] })).toMatchObject({ branches: 1 });
+    expect(await branchesOf(r.dir)).not.toContain('swarm/issue-4-old');
+    expect(await recovered(r.dir)).toEqual([tip]);
+  });
+
+  it("keeps a machine's unpushed commit when its branch goes, and the machine itself while its worktree has changes", async () => {
+    const r = await makeRepos();
+    const desk = await prepareMachineDesk('pres0001', r.fullName, base, 'swarm/issue-1-ada');
+    await commitFile(desk, 'mine.txt', 'unpushed\n');
+    const tip = await head(desk);
+    await prepareMachineDesk('pres0001', r.fullName, base, 'swarm/issue-2-ada');
+    const clone = path.dirname(await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: desk }));
+    // Moving the worktree on kept the commit in a recovery ref of the clone, so the branch can go.
+    expect(await recovered(clone)).toEqual([tip]);
+    expect(await sweepMachine('pres0001', r.fullName, [])).toBe(1);
+    expect(await branchesOf(clone)).not.toContain('swarm/issue-1-ada');
+    await fs.writeFile(path.join(desk, 'draft.txt'), 'untracked\n');
+    expect(await removeMachine('pres0001')).toEqual({ removed: false, patches: [] });
+    expect(await isDir(desk)).toBe(true);
+    await fs.rm(path.join(desk, 'draft.txt'));
+    expect((await removeMachine('pres0001')).removed).toBe(true);
+    // The unpushed commit now lives in the floor's checkout.
+    expect(await recovered(r.dir)).toContain(tip);
   });
 });
