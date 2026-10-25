@@ -27,7 +27,7 @@ const record = (r: Partial<MergeRecord> = {}): MergeRecord => ({
 describe('mergeStep', () => {
   it('merges a clean, green PR at the commit QA passed', () => {
     expect(mergeStep(pull(), record(), NOW, base)).toEqual({ do: 'merge', set: { pendingSince: null } });
-    expect(mergeStep(pull({ checks: 'none' }), record(), NOW, base).do).toBe('merge');
+    expect(mergeStep(pull({ checks: 'none' }), record(), NOW, base).do).toBe('wait'); // no passing CI: never merges
   });
 
   it('waits on a draft without touching the record', () => {
@@ -67,11 +67,8 @@ describe('mergeStep', () => {
       expect(mergeStep(pull({ headSha: 'new456', mergeable: 'CONFLICTING', checks: 'failing' }), record(), NOW, base).do).toBe('requeue');
     });
 
-    it('adopts the head as the passed commit for records from before commits were tracked', () => {
-      expect(mergeStep(pull({ headSha: 'def789' }), record({ passedSha: null }), NOW, base)).toEqual({
-        do: 'merge',
-        set: { passedSha: 'def789', pendingSince: null },
-      });
+    it('requeues records without a passed commit instead of adopting the head', () => {
+      expect(mergeStep(pull({ headSha: 'def789' }), record({ passedSha: null }), NOW, base)).toEqual({ do: 'requeue', set: {} });
     });
   });
 
@@ -179,5 +176,28 @@ describe('mergeStep', () => {
     it('still updates a branch that fell behind while waiting', () => {
       expect(mergeStep(pull({ mergeState: 'BEHIND' }), record({ mergeRetryAt: NOW + 60_000 }), NOW, base).do).toBe('update-branch');
     });
+  });
+});
+
+describe('mergeStep adversarial matrix', () => {
+  const refusals: [string, Partial<MergePull>][] = [
+    ['draft', { isDraft: true }],
+    ['pending checks', { checks: 'pending' }],
+    ['failing checks', { checks: 'failing' }],
+    ['no checks', { checks: 'none' }],
+    ['BLOCKED', { mergeState: 'BLOCKED' }],
+    ['BEHIND', { mergeState: 'BEHIND' }],
+    ['DIRTY', { mergeState: 'DIRTY' }],
+    ['UNKNOWN', { mergeState: 'UNKNOWN', mergeable: 'UNKNOWN' }],
+    ['head moved', { headSha: 'moved1' }],
+  ];
+  for (const [name, p] of refusals) {
+    it(`never merges: ${name}`, () => {
+      expect(mergeStep(pull(p), record(), NOW, { ...base, detailed: true }).do).not.toBe('merge');
+    });
+  }
+
+  it('never adopts an unknown head as the passed commit', () => {
+    expect(mergeStep(pull(), record({ passedSha: null }), NOW, { ...base, detailed: true }).do).not.toBe('merge');
   });
 });

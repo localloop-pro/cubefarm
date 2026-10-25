@@ -17,3 +17,17 @@ describe('checksOf', () => {
     expect(checksOf([{ name: 'a', status: 'IN_PROGRESS' }])).toBe('pending');
   });
 });
+
+describe('checksOf never reports passing without a real success', () => {
+  for (const conclusion of ['NEUTRAL', 'SKIPPED']) {
+    it(`${conclusion} alone is none`, () => {
+      expect(checksOf([{ name: 'a', status: 'COMPLETED', conclusion }])).toBe('none');
+    });
+  }
+  it('a failure beside a success fails', () => {
+    expect(checksOf([{ name: 'a', status: 'COMPLETED', conclusion: 'SUCCESS' }, { name: 'b', status: 'COMPLETED', conclusion: 'FAILURE' }])).toBe('failing');
+  });
+  it('a pending check beside a success is pending', () => {
+    expect(checksOf([{ name: 'a', status: 'COMPLETED', conclusion: 'SUCCESS' }, { name: 'b', status: 'QUEUED' }])).toBe('pending');
+  });
+});
