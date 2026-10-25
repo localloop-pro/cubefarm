@@ -475,6 +475,9 @@ export function createDemoBackend(): Backend {
         state: pr.state,
         mergeable: pr.mergeable,
         mergeState: pr.mergeState,
+        isDraft: pr.isDraft,
+        reviewDecision: null,
+        checks: pr.checks,
       };
     },
     issueDetails: async (fullName, number) => {

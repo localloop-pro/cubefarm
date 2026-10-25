@@ -8,7 +8,7 @@ import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, planRoute, specialtyLabel, specialtySlug, type CeoJob, type OfficeTools } from './ceo.ts';
 import { HttpError } from './httpError.ts';
-import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep } from './mergeGate.ts';
+import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep, type MergeRecord, type MergeStep } from './mergeGate.ts';
 import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
 import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type LastUpdate } from './officeUpdate.ts';
 import { clampPacingSessions, DEFAULT_PACING_SESSIONS, mayStart, PACING_MS, pacingMessage, usageLabel, usageView, type UsageWarning, type WorkKind } from './pacing.ts';
@@ -1005,13 +1005,7 @@ export class Swarm {
 
   /** One step toward merging a QA-passed PR. Returns true when it merged. */
   private async advanceMerge(repo: PersistedRepo, rec: QaRecord, pr: PullInfo): Promise<boolean> {
-    let step = mergeStep(pr, rec, Date.now(), { base: repo.defaultBranch });
-    if (step.do === 'details') {
-      // GitHub works mergeability out lazily and lists often say UNKNOWN; asking about the PR itself gets an answer.
-      const d = await this.backend.prDetails(repo.fullName, pr.number);
-      pr = { ...pr, headSha: d.headSha, mergeable: d.mergeable, mergeState: d.mergeState };
-      step = mergeStep(pr, rec, Date.now(), { base: repo.defaultBranch, detailed: true });
-    }
+    const step = await freshMergeStep(this.backend, repo.fullName, pr.number, rec, repo.defaultBranch, pr);
     Object.assign(rec, step.set);
     if (step.do === 'requeue') {
       // Commits arrived after QA's sign-off: they get tested too.
@@ -1040,7 +1034,7 @@ export class Swarm {
     let error = '';
     for (const method of ['squash', 'merge', 'rebase'] as const) {
       try {
-        await this.backend.mergePull(repo.fullName, pr.number, method, rec.passedSha ?? pr.headSha);
+        await this.backend.mergePull(repo.fullName, pr.number, method, rec.passedSha!); // set by the gate: never another SHA
         error = '';
         break;
       } catch (err) {
@@ -1225,7 +1219,8 @@ export class Swarm {
 
   async mergePull(repoId: string, number: number, method: 'squash' | 'merge' | 'rebase' = 'squash') {
     const repo = this.repo(repoId);
-    await this.backend.mergePull(repo.fullName, number, method);
+    const rec = this.state.qa.find((q) => q.repoId === repo.id && q.prNumber === number);
+    await manualMerge(this.backend, repo.fullName, number, method, rec, repo.defaultBranch);
     this.toast('success', `Merged PR #${number} into ${repo.defaultBranch}`);
     await this.syncRepo(repo.id);
     setTimeout(() => this.schedule(), 200);
@@ -3169,4 +3164,55 @@ export class Swarm {
 /** The QA record changes that send a PR whose head moved after sign-off back to QA: the old pass is dropped, never moved to the new head. */
 export function retestPatch(rec: Pick<QaRecord, 'round' | 'retests'>): Partial<QaRecord> {
   return { status: 'queued', round: rec.round + 1, retests: rec.retests + 1, passedSha: null, mergeNote: null, pendingSince: null };
+}
+
+// ---------- merge gate, shared by manual and automatic merges ----------
+
+/**
+ * Ask GitHub about the PR once and run the merge gate on that one fresh answer (lists often say UNKNOWN or lag).
+ * `listed` only lends the failed/pending check names for messages.
+ */
+export async function freshMergeStep(
+  backend: Pick<Backend, 'prDetails'>,
+  fullName: string,
+  number: number,
+  rec: MergeRecord,
+  base: string,
+  listed?: Pick<PullInfo, 'failedChecks' | 'pendingChecks'>,
+): Promise<MergeStep> {
+  const d = await backend.prDetails(fullName, number);
+  if (d.state !== 'OPEN') return { do: 'wait', note: `PR is ${d.state.toLowerCase()}`, set: {} };
+  const pr = {
+    isDraft: d.isDraft,
+    mergeable: d.mergeable,
+    mergeState: d.mergeState,
+    headSha: d.headSha,
+    checks: d.checks,
+    failedChecks: listed?.failedChecks ?? [],
+    pendingChecks: listed?.pendingChecks ?? [],
+  };
+  return mergeStep(pr, rec, Date.now(), { base, detailed: true });
+}
+
+/** The manager's merge button: only a currently QA-passed PR, gated like auto-merge, merged at QA's tested SHA; else 409. */
+export async function manualMerge(
+  backend: Pick<Backend, 'prDetails' | 'mergePull'>,
+  fullName: string,
+  number: number,
+  method: 'squash' | 'merge' | 'rebase',
+  rec: (MergeRecord & { status: string }) | undefined,
+  base: string,
+): Promise<void> {
+  if (!rec || rec.status !== 'passed' || !rec.passedSha) throw new HttpError(409, `PR #${number} hasn't passed QA at its current commit`);
+  const step = await freshMergeStep(backend, fullName, number, { ...rec, mergeRetryAt: null }, base);
+  if (step.do !== 'merge') {
+    const reason =
+      step.do === 'requeue' ? 'new commits arrived after QA passed it'
+      : step.do === 'send-back' ? (step.reason === 'conflict' ? `it conflicts with ${base}` : 'its checks are failing')
+      : step.do === 'update-branch' ? `it is behind ${base}`
+      : step.do === 'wait' ? (step.note ?? 'it is not ready')
+      : 'GitHub has not worked out whether it can merge';
+    throw new HttpError(409, `PR #${number} can't be merged: ${reason}`);
+  }
+  await backend.mergePull(fullName, number, method, rec.passedSha);
 }
