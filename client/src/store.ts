@@ -141,6 +141,7 @@ export const useStore = create<State>((set, get) => ({
     setupDone: true,
     tutorialStep: -1,
     pacingSessions: 3,
+    schedulerPaused: false,
   },
   clis: [],
   repos: [],

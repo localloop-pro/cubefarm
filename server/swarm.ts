@@ -343,6 +343,11 @@ const ICON = { pass: '✅', fail: '❌', skip: '⏭️' } as const;
 
 export { HttpError };
 
+/** Paused at startup: a stored true always stays; SWARM_START_PAUSED=1 may force true but never clears. */
+export function schedulerPausedOnStart(stored: unknown, env: Record<string, string | undefined>): boolean {
+  return stored === true || env.SWARM_START_PAUSED === '1';
+}
+
 export class Swarm {
   private state: Persisted = {
     settings: {
@@ -361,6 +366,7 @@ export class Swarm {
       tutorialStep: 0,
       autoUpdate: true,
       pacingSessions: DEFAULT_PACING_SESSIONS,
+      schedulerPaused: false,
     },
     repos: [],
     agents: [],
@@ -481,6 +487,7 @@ export class Swarm {
         if (loaded.settings?.sessionLimit === undefined) old.sessionLimit = old.maxConcurrent === 4 ? 0 : old.maxConcurrent;
         delete old.maxConcurrent;
       }
+      this.state.settings.schedulerPaused = loaded.settings?.schedulerPaused === true;
       delete old.permissionMode; // the office's rules are instructions now, not a permission mode
       // Offices that were set up before the setup wizard existed skip it.
       if (loaded.settings && loaded.settings.setupDone === undefined && this.state.repos.length > 0) {
@@ -489,6 +496,7 @@ export class Swarm {
     } catch {
       // first run
     }
+    this.state.settings.schedulerPaused = schedulerPausedOnStart(this.state.settings.schedulerPaused, process.env);
     for (const r of this.state.repos) if (r.localPath) this.backend.setLocalPath(r.fullName, r.localPath);
     const interrupted: PersistedAgent[] = [];
     for (const a of this.state.agents) {
@@ -2144,11 +2152,17 @@ export class Swarm {
     if (patch.tutorialStep !== undefined) s.tutorialStep = Math.max(-1, Math.round(Number(patch.tutorialStep)) || 0);
     if (typeof patch.autoUpdate === 'boolean') s.autoUpdate = patch.autoUpdate;
     if (patch.pacingSessions !== undefined) s.pacingSessions = clampPacingSessions(patch.pacingSessions);
+    if (typeof patch.schedulerPaused === 'boolean') s.schedulerPaused = patch.schedulerPaused;
     this.save();
     this.broadcast({ type: 'settings', settings: s });
     this.emitCeo();
     setTimeout(() => this.schedule(), 200);
     return s;
+  }
+
+  /** Hold or release autonomous work; persisted with the settings. */
+  setSchedulerPaused(paused: boolean) {
+    return this.updateSettings({ schedulerPaused: paused === true });
   }
 
   /** The setup wizard: who you are, the company, and your CEO. */
