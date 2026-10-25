@@ -199,9 +199,9 @@ export interface PrDetails {
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   mergeable: string;
   mergeState: string;
-  isDraft?: boolean;
-  reviewDecision?: string | null;
-  checks?: PullInfo['checks'];
+  isDraft: boolean;
+  reviewDecision: string | null;
+  checks: PullInfo['checks'];
 }
 
 export async function prDetails(fullName: string, number: number): Promise<PrDetails> {
