@@ -8,6 +8,7 @@ import { installedBrowsers, pickBrowser, webServerCommand } from './scripts/e2eS
 // then drive it in headless Chromium (or a local Google Chrome, see scripts/e2eSteps.mjs) with software WebGL.
 
 const PORT = Number(process.env.E2E_PORT || 4399);
+const BASE_URL = `http://127.0.0.1:${PORT}`;
 // The live office runs on 4317 (server) and 5317 (Vite); a test run must never land on either.
 if (!Number.isInteger(PORT) || PORT <= 0 || PORT === 4317 || PORT === 5317) throw new Error(`E2E_PORT ${process.env.E2E_PORT} is not allowed: pick a free port other than 4317/5317`);
 
@@ -40,7 +41,10 @@ export default defineConfig({
   expect: { timeout: 30_000 },
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : [['list']],
   use: {
-    baseURL: `http://127.0.0.1:${PORT}`,
+    baseURL: BASE_URL,
+    // APIRequestContext is not a browser navigation and otherwise omits Origin on PATCH/PUT/POST. The office's
+    // request boundary deliberately rejects such originless unsafe requests.
+    extraHTTPHeaders: { Origin: BASE_URL },
     // No screencast in the trace: it costs frames, and software WebGL has few to spare.
     trace: { mode: 'retain-on-failure', screenshots: false },
     screenshot: 'only-on-failure',
@@ -53,7 +57,7 @@ export default defineConfig({
   ],
   webServer: {
     command: webServerCommand(process.env),
-    url: `http://127.0.0.1:${PORT}/api/state`,
+    url: `${BASE_URL}/api/state`,
     env: { SWARM_HOME: process.env.E2E_SWARM_HOME, SWARM_PORT: String(PORT) },
     // Never attach to a server that's already there: it could be someone's office.
     reuseExistingServer: false,
