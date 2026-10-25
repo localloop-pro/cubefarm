@@ -3188,6 +3188,7 @@ export async function freshMergeStep(
     mergeState: d.mergeState,
     headSha: d.headSha,
     checks: d.checks,
+    reviewDecision: d.reviewDecision,
     failedChecks: listed?.failedChecks ?? [],
     pendingChecks: listed?.pendingChecks ?? [],
   };

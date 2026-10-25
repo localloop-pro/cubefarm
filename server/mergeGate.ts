@@ -18,7 +18,7 @@ export interface MergeRecord {
 /** Bookkeeping the caller writes onto the record as it is (it doesn't count as a change to the record). */
 export type MergeBookkeeping = Partial<Pick<MergeRecord, 'passedSha' | 'pendingSince' | 'alerted'>>;
 
-export type MergePull = Pick<PullInfo, 'isDraft' | 'mergeable' | 'mergeState' | 'headSha' | 'checks' | 'failedChecks' | 'pendingChecks'>;
+export type MergePull = Pick<PullInfo, 'isDraft' | 'mergeable' | 'mergeState' | 'headSha' | 'checks' | 'failedChecks' | 'pendingChecks'> & { reviewDecision?: string | null };
 
 /** What auto-merge does next with a QA-passed PR. */
 export type MergeStep = { set: MergeBookkeeping } & (
@@ -38,8 +38,7 @@ export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { 
   if (pr.isDraft) return { do: 'wait', note: 'a draft: waiting', set: {} };
   if (!opts.detailed && (pr.mergeable === 'UNKNOWN' || pr.mergeState === 'UNKNOWN')) return { do: 'details', set: {} };
   const set: MergeBookkeeping = {};
-  if (rec.passedSha == null) set.passedSha = pr.headSha; // signed off before the office tracked commits
-  if (pr.headSha !== (set.passedSha ?? rec.passedSha)) return { do: 'requeue', set };
+  if (rec.passedSha == null || pr.headSha !== rec.passedSha) return { do: 'requeue', set }; // QA tests the exact head first
   const needsHuman = rec.mergeFixes >= MAX_MERGE_FIXES;
   if (pr.mergeable === 'CONFLICTING' || pr.mergeState === 'DIRTY') {
     return { do: 'send-back', reason: 'conflict', instructions: `It conflicts with ${opts.base}.`, needsHuman, set };
@@ -56,6 +55,10 @@ export function mergeStep(pr: MergePull, rec: MergeRecord, now: number, opts: { 
     return { do: 'wait', note: `waiting for checks: ${pr.pendingChecks.join(', ') || 'running'}`, alert, set };
   }
   set.pendingSince = null;
+  // Fail closed: no requested changes, explicit passing CI, and a merge state GitHub doesn't block.
+  if (pr.reviewDecision === 'CHANGES_REQUESTED') return { do: 'wait', note: 'changes were requested in review', set };
+  if (pr.checks !== 'passing') return { do: 'wait', note: 'no passing checks to merge on', set };
+  if (pr.mergeState === 'BLOCKED') return { do: 'wait', note: 'GitHub says merging is blocked', set };
   if (pr.mergeable === 'UNKNOWN') return { do: 'wait', note: 'GitHub is checking it can merge', set };
   if (pr.mergeState === 'BEHIND') return { do: 'update-branch', set };
   if (rec.mergeRetryAt && now < rec.mergeRetryAt) return { do: 'wait', set };
