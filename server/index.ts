@@ -400,6 +400,9 @@ server.on('upgrade', (req, socket, head) => {
   const target = pathname === '/ws' ? wss : pathname === '/ws/term' ? terms : null;
   if (!target && upgradeGateway(req, socket as Socket, head, proxied)) return;
   if (!target) return void socket.destroy();
+  const decision = officeRequest({ method: req.method ?? 'GET', headers: req.headers, rawHeaders: req.rawHeaders, url: req.url ?? '', isUpgrade: true },
+    { port: req.socket.localPort ?? PORT, dev, clientPort });
+  if (!decision.allow) return void socket.end(`HTTP/1.1 ${decision.status} Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   target.handleUpgrade(req, socket, head, (ws) => target.emit('connection', ws, req));
 });
 

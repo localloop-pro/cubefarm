@@ -152,3 +152,19 @@ describe('HTTP boundary before JSON parsing', () => {
     expect((await send('/api/state', { method: 'GET', rawHeaders })).status).toBe(403);
   });
 });
+
+describe('WebSocket boundary', () => {
+  const upgrade = (origin: string) => new Promise<number>((resolve, reject) => {
+    const req = http.request({
+      hostname: '127.0.0.1', port, path: '/ws', agent: false,
+      headers: { Host: `localhost:${port}`, Origin: origin, Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==' },
+    });
+    req.on('response', (res) => { res.resume(); resolve(res.statusCode ?? 0); });
+    req.on('upgrade', (_res, socket) => { socket.destroy(); resolve(101); });
+    req.on('error', reject);
+    req.end();
+  });
+  it('rejects a cross-origin upgrade', async () => {
+    expect(await upgrade('http://evil.test')).toBe(403);
+  });
+});
