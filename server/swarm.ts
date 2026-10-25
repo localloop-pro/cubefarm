@@ -1015,7 +1015,7 @@ export class Swarm {
     Object.assign(rec, step.set);
     if (step.do === 'requeue') {
       // Commits arrived after QA's sign-off: they get tested too.
-      this.setQa(rec, { status: 'queued', round: rec.round + 1, retests: rec.retests + 1, mergeNote: null, pendingSince: null });
+      this.setQa(rec, retestPatch(rec));
       setTimeout(() => this.schedule(), 200);
       return false;
     }
@@ -1030,8 +1030,9 @@ export class Swarm {
       // The repo only merges up-to-date branches. GitHub merges the base in cleanly (or refuses); CI checks the result.
       this.mergeNote(rec, `updating the branch with ${repo.defaultBranch}`);
       await this.backend.updateBranch(repo.fullName, pr.number);
-      const details = await this.backend.prDetails(repo.fullName, pr.number);
-      this.setQa(rec, { passedSha: details.headSha });
+      // The new head was never tested: QA's sign-off no longer covers it, so it goes back to QA.
+      this.setQa(rec, retestPatch(rec));
+      setTimeout(() => this.schedule(), 200);
       return false;
     }
     if (step.do !== 'merge') return false;
@@ -3163,4 +3164,9 @@ export class Swarm {
     }
     return plan.summary;
   }
+}
+
+/** The QA record changes that send a PR whose head moved after sign-off back to QA: the old pass is dropped, never moved to the new head. */
+export function retestPatch(rec: Pick<QaRecord, 'round' | 'retests'>): Partial<QaRecord> {
+  return { status: 'queued', round: rec.round + 1, retests: rec.retests + 1, passedSha: null, mergeNote: null, pendingSince: null };
 }
