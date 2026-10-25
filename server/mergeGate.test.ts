@@ -181,3 +181,26 @@ describe('mergeStep', () => {
     });
   });
 });
+
+describe('mergeStep adversarial matrix', () => {
+  const refusals: [string, Partial<MergePull>][] = [
+    ['draft', { isDraft: true }],
+    ['pending checks', { checks: 'pending' }],
+    ['failing checks', { checks: 'failing' }],
+    ['no checks', { checks: 'none' }],
+    ['BLOCKED', { mergeState: 'BLOCKED' }],
+    ['BEHIND', { mergeState: 'BEHIND' }],
+    ['DIRTY', { mergeState: 'DIRTY' }],
+    ['UNKNOWN', { mergeState: 'UNKNOWN', mergeable: 'UNKNOWN' }],
+    ['head moved', { headSha: 'moved1' }],
+  ];
+  for (const [name, p] of refusals) {
+    it(`never merges: ${name}`, () => {
+      expect(mergeStep(pull(p), record(), NOW, { ...base, detailed: true }).do).not.toBe('merge');
+    });
+  }
+
+  it('never adopts an unknown head as the passed commit', () => {
+    expect(mergeStep(pull(), record({ passedSha: null }), NOW, { ...base, detailed: true }).do).not.toBe('merge');
+  });
+});

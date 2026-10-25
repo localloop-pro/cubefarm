@@ -76,3 +76,75 @@ describe('manual and automatic merges', () => {
     }
   });
 });
+
+// ---------- adversarial matrix: every refusal merges zero times, on both paths ----------
+
+describe('adversarial merge matrix', () => {
+  const prCases: [string, Partial<PrDetails>][] = [
+    ['a closed PR', { state: 'CLOSED' }],
+    ['a merged PR', { state: 'MERGED' }],
+    ['a draft', { isDraft: true }],
+    ['requested changes', { reviewDecision: 'CHANGES_REQUESTED' }],
+    ['pending checks', { checks: 'pending' }],
+    ['failing checks', { checks: 'failing' }],
+    ['no checks (none, or neutral/skipped only)', { checks: 'none' }],
+    ['mergeState BLOCKED', { mergeState: 'BLOCKED' }],
+    ['mergeState BEHIND', { mergeState: 'BEHIND' }],
+    ['mergeState DIRTY', { mergeState: 'DIRTY' }],
+    ['mergeState UNKNOWN', { mergeState: 'UNKNOWN', mergeable: 'UNKNOWN' }],
+    ['head moved between QA pass and merge', { headSha: 'bbb222' }],
+  ];
+  for (const [name, p] of prCases) {
+    it(`manual: ${name} answers 409 with a reason and never merges`, async () => {
+      const m = backend(details(p));
+      await expect(manualMerge(m, 'o/r', 7, 'squash', rec(), 'main')).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/can't be merged: \S/) });
+      expect(m.mergePull).toHaveBeenCalledTimes(0);
+    });
+    it(`auto: ${name} gives a non-merge step and never merges`, async () => {
+      const a = backend(details(p));
+      const step = await autoMerge(a);
+      expect(step.do).not.toBe('merge');
+      expect(step.do === 'wait' ? step.note : step.do).toBeTruthy(); // the refusal is surfaced, not silent
+      expect(a.mergePull).toHaveBeenCalledTimes(0);
+    });
+  }
+
+  const qaCases: [string, (Omit<ReturnType<typeof rec>, 'passedSha'> & { passedSha: string | null }) | undefined][] = [
+    ['QA record missing', undefined],
+    ['QA failed', { ...rec(), status: 'failed', passedSha: null }],
+    ['QA passed on another SHA', { ...rec(), passedSha: 'ccc333' }],
+  ];
+  for (const [name, r] of qaCases) {
+    it(`manual: ${name} answers 409 and never merges`, async () => {
+      const m = backend(details());
+      await expect(manualMerge(m, 'o/r', 7, 'squash', r, 'main')).rejects.toMatchObject({ status: 409 });
+      expect(m.mergePull).toHaveBeenCalledTimes(0);
+    });
+    it(`auto: ${name} never merges`, async () => {
+      const a = backend(details());
+      const step = r && r.status === 'passed' ? await freshMergeStep(a, 'o/r', 7, r, 'main') : null;
+      if (step?.do === 'merge') await a.mergePull('o/r', 7, 'squash', r!.passedSha);
+      expect(step?.do ?? 'not passed').not.toBe('merge');
+      expect(a.mergePull).toHaveBeenCalledTimes(0);
+    });
+  }
+
+  it('prDetails throwing reaches neither merge on either path', async () => {
+    const boom = () => ({ prDetails: vi.fn(async (): Promise<PrDetails> => { throw new Error('gh down'); }), mergePull: vi.fn(async (..._a: unknown[]) => {}) });
+    const m = boom();
+    await expect(manualMerge(m, 'o/r', 7, 'squash', rec(), 'main')).rejects.toThrow('gh down');
+    expect(m.mergePull).toHaveBeenCalledTimes(0);
+    const a = boom();
+    await expect(freshMergeStep(a, 'o/r', 7, rec(), 'main')).rejects.toThrow('gh down');
+    expect(a.mergePull).toHaveBeenCalledTimes(0);
+  });
+
+  it('exactly one positive case per path merges once at rec.passedSha', async () => {
+    const m = backend(details());
+    await manualMerge(m, 'o/r', 7, 'squash', rec(), 'main');
+    expect(m.mergePull.mock.calls).toEqual([['o/r', 7, 'squash', rec().passedSha]]);
+    const a = backend(details());
+    await autoMerge(a);
+    expect(a.mergePull.mock.calls).toEqual([['o/r', 7, 'squash', rec().passedSha]]);
+  });
+});
