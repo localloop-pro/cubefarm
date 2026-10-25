@@ -238,3 +238,116 @@ describe('scheduler pause gates', () => {
     expect(a.status).toBe('working');
   });
 });
+
+// ---------- races ----------
+
+describe('scheduler pause races', () => {
+  const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); await new Promise((r) => setImmediate(r)); };
+
+  it('init: SWARM_START_PAUSED=1 pauses a stored false; a stored true stays with the env unset', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval'] });
+    const env = process.env.SWARM_START_PAUSED;
+    try {
+      const backend = new Proxy({}, { get: () => () => undefined }) as unknown as Backend;
+      await fs.writeFile(STATE_FILE, JSON.stringify({ settings: { schedulerPaused: false } }));
+      process.env.SWARM_START_PAUSED = '1';
+      const a = new Swarm(backend) as Any;
+      await a.init().catch(() => {});
+      expect(a.state.settings.schedulerPaused).toBe(true);
+
+      await fs.writeFile(STATE_FILE, JSON.stringify({ settings: { schedulerPaused: true } }));
+      delete process.env.SWARM_START_PAUSED;
+      const b = new Swarm(backend) as Any;
+      await b.init().catch(() => {});
+      expect(b.state.settings.schedulerPaused).toBe(true);
+
+      await fs.writeFile(STATE_FILE, JSON.stringify({ settings: { schedulerPaused: false } }));
+      const c = new Swarm(backend) as Any;
+      await c.init().catch(() => {});
+      expect(c.state.settings.schedulerPaused).toBe(false);
+    } finally {
+      if (env === undefined) delete process.env.SWARM_START_PAUSED;
+      else process.env.SWARM_START_PAUSED = env;
+      await fs.rm(STATE_FILE, { force: true });
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('a held dev issue launches exactly once after resume', async () => {
+    let h: Any;
+    h = harness({ prepareDesk: pausingPrepare(() => h) });
+    const a = h.agent('dev');
+    const issue = { number: 3, title: 't', labels: [], body: '', url: '' };
+    await h.s.runTask(a, h.repo, issue);
+    expect(h.calls.startSession).toHaveBeenCalledTimes(0);
+    h.calls.prepareDesk.mockImplementation(async () => '/desk');
+    h.s.setSchedulerPaused(false);
+    await h.s.runTask(a, h.repo, issue);
+    expect(h.calls.prepareDesk).toHaveBeenCalledTimes(2);
+    expect(h.calls.startSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('a held QA run starts once on resume even when the scheduler runs twice', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval'] });
+    try {
+      let h: Any;
+      h = harness({ prepareDesk: pausingPrepare(() => h) });
+      const a = h.agent('qa1', 'qa');
+      const rec = h.qa();
+      await h.s.runQa(a, h.repo, rec);
+      expect(rec.status).toBe('queued');
+      expect(h.calls.startSession).toHaveBeenCalledTimes(0);
+
+      h.calls.prepareDesk.mockImplementation(async () => '/desk');
+      h.s.setSchedulerPaused(false);
+      h.s.schedule();
+      h.s.schedule();
+      await flush();
+      expect(h.calls.startSession).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('a CEO job put back by a pause runs once after resume', async () => {
+    const h = harness();
+    const a = h.agent('ceo', 'ceo');
+    const orig = h.s.appendLog.bind(h.s);
+    let first = true;
+    h.s.appendLog = (ag: Any, e: Any) => {
+      if (first) h.s.setSchedulerPaused(true);
+      first = false;
+      return orig(ag, e);
+    };
+    await h.s.runCeoJob(a, { kind: 'review', at: 1 });
+    expect(h.s.state.ceo.queue).toHaveLength(1);
+    h.s.setSchedulerPaused(false);
+    const job = h.s.state.ceo.queue.shift();
+    await h.s.runCeoJob(a, job);
+    expect(h.calls.startSession).toHaveBeenCalledTimes(1);
+    expect(h.s.state.ceo.queue).toHaveLength(0);
+  });
+
+  it('a merge retry that comes due while paused waits', async () => {
+    const h = harness();
+    h.s.setSchedulerPaused(true);
+    h.qa({ status: 'passed', passedSha: 'aaa', mergeRetryAt: Date.now() - 1 });
+    await h.s.advanceMerges(h.repo);
+    expect(h.calls.mergePull).toHaveBeenCalledTimes(0);
+    expect(h.calls.updateBranch).toHaveBeenCalledTimes(0);
+  });
+
+  it('a paused scheduler pass leaves queued work untouched for resume', () => {
+    const h = harness();
+    h.s.setSchedulerPaused(true);
+    h.agent('qa1', 'qa');
+    const rec = h.qa();
+    const fix = h.qa({ prNumber: 8, status: 'failed' });
+    h.s.schedule();
+    expect(rec.status).toBe('queued');
+    expect(fix.status).toBe('failed');
+    expect(h.calls.prepareDesk).toHaveBeenCalledTimes(0);
+  });
+});
