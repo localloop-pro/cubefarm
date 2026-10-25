@@ -645,6 +645,18 @@ function IssuesTab({ initialRepo }: { initialRepo?: string }) {
 
 // ---------- settings ----------
 
+/** Holds autonomous work (auto-assign, CEO reviews) without stopping running sessions. */
+export function SchedulerPauseToggle({ paused }: { paused: boolean }) {
+  return (
+    <label className="toggle block">
+      <input type="checkbox" checked={paused} onChange={(e) => void attempt(() => api.updateSettings({ schedulerPaused: e.target.checked }))} />
+      <span>
+        <b>Pause scheduling</b>{paused ? ' (paused)' : ''}: no new autonomous work starts. Running sessions carry on.
+      </span>
+    </label>
+  );
+}
+
 function SettingsTab() {
   const settings = useStore((s) => s.settings);
   const clis = useStore((s) => s.clis);
@@ -658,6 +670,7 @@ function SettingsTab() {
     <div className="tab-grid">
       <div className="card">
         <h3>🧠 Agents</h3>
+        <SchedulerPauseToggle paused={settings.schedulerPaused} />
         {terminal && (
           <label className="field">
             <span>Default coding agent</span>
