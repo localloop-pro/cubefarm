@@ -2,6 +2,10 @@
 
 Status: blocked; microphone acceptance is not confirmed.
 
+PR #58 is a non-closing tracking report, not the implementation of #37. Its
+description must use a non-closing reference so merging this report leaves #37 open.
+Draft status is not a safeguard against the office's automatic merge process.
+
 ## Checked revisions
 
 - Assigned base `main`: `f04000cbd8d59503418bf8d37f171230ebaed5bc`.
