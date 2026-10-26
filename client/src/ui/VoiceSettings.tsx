@@ -29,8 +29,9 @@ export function VoiceSettings() {
   };
 
   const handleHandsFreeToggle = async (enabled: boolean) => {
-    // TODO: get CEO voice provider from settings/state
-    const ceoVoiceProvider = 'off'; // placeholder
+    // Get CEO voice provider from settings (currently not stored; default to 'off' for now)
+    // TODO: add ceoVoiceProvider to SwarmSettings
+    const ceoVoiceProvider = 'off';
     const result = await setHandsFree(enabled, ceoVoiceProvider);
     if (result.ok) {
       setHandsFreeEnabled(enabled);
@@ -74,6 +75,14 @@ export function VoiceSettings() {
               {permissionState === 'prompt' && '⏳ Not yet asked'}
               {permissionState === 'unknown' && '❓ Unknown'}
             </td>
+          </tr>
+          <tr>
+            <td>CEO voice provider</td>
+            <td>❌ Off</td>
+          </tr>
+          <tr>
+            <td>Listen provider</td>
+            <td>❌ Off</td>
           </tr>
         </tbody>
       </table>
