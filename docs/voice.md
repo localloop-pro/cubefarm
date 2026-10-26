@@ -38,6 +38,30 @@ Go to Settings → Voice → "Mic check" to see:
 - Whether the microphone permission is granted
 - Click "Test mic" to verify your microphone works
 
+## How to test voice features
+
+The e2e tests in `e2e/mic.spec.ts` verify that voice features work correctly in various scenarios:
+
+**Run the tests locally:**
+```bash
+npm run test:e2e
+```
+
+**Test scenarios covered:**
+- Insecure context: mic button is dimmed and shows HTTPS/localhost message
+- Permission denied: error toast shown, hands-free remains off
+- Permission granted: mic button is functional, voice features enabled
+- Hands-free lifecycle: recognition starts after CEO reply playback; errors are handled gracefully (fail-closed)
+- Unmount safety: closing the phone during voice playback does not trigger late sends or errors
+- Multiple viewports: tests run at both desktop (1280×720) and phone (390×844) sizes
+- Console safety: no TypeErrors or unhandled exceptions on insecure contexts
+
+**Browser stubs:**
+The tests stub SpeechRecognition and speechSynthesis via `addInitScript` to avoid requiring real audio hardware or permissions during test runs. This ensures deterministic, fast test execution.
+
+**CI:**
+The e2e tests run on all CI jobs (GitHub Actions) to catch regressions in voice features on both macOS and Windows.
+
 ## Hold vs tap
 
 - **Hold for ≥0.3 s:** records a single message. Release to transcribe.
