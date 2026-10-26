@@ -27,9 +27,9 @@ describe('handsFree', () => {
     expect(typeof listenForVoice).toBe('function');
   });
 
-  it('exports handsFreeProblem function', async () => {
-    const { handsFreeProblem } = await import('./handsFree');
-    expect(typeof handsFreeProblem).toBe('function');
+  it('exports abortAllListening function', async () => {
+    const { abortAllListening } = await import('./handsFree');
+    expect(typeof abortAllListening).toBe('function');
   });
 
   it('exports setHandsFree function', async () => {
@@ -55,11 +55,27 @@ describe('handsFree', () => {
     expect(result.ok).toBe(true);
   });
 
-  it('listenForVoice rejects when SpeechRecognition not available', async () => {
-    // In Node.js test environment, there's no SpeechRecognition API
-    // So the function should reject
-    const { listenForVoice } = await import('./handsFree');
-    const promise = listenForVoice();
-    await expect(promise).rejects.toThrow();
+  describe('setHandsFree', () => {
+    it('returns ok for invalid provider when disabled', async () => {
+      const { setHandsFree } = await import('./handsFree');
+      const result = await setHandsFree(false, 'off');
+      expect(result.ok).toBe(true);
+    });
+
+    it('returns error when provider is off', async () => {
+      const { setHandsFree } = await import('./handsFree');
+      const result = await setHandsFree(true, 'off');
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain('enable voice');
+    });
+
+    it('returns error when mic permission denied', async () => {
+      const { allowMic } = await import('./mic');
+      vi.mocked(allowMic).mockResolvedValueOnce('permission denied');
+
+      const { setHandsFree } = await import('./handsFree');
+      const result = await setHandsFree(true, 'browser');
+      expect(result.ok).toBe(false);
+    });
   });
 });

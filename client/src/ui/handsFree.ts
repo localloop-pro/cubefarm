@@ -20,10 +20,35 @@ export function handsFreeProblem(ceoVoiceProvider: string): string {
 
 const LISTEN_TIMEOUT_MS = 30000; // 30 second timeout for speech recognition
 
-/** Start listening for voice input and return the recognized text, or reject on error. */
-export async function listenForVoice(): Promise<string> {
-  let stream: MediaStream | null = null;
-  let recognition: any = null;
+interface ListenSession {
+  aborted: boolean;
+  recognition: any | null;
+  stream: MediaStream | null;
+  timeoutHandle: ReturnType<typeof setTimeout> | null;
+}
+
+// Track active listening sessions to enable cancellation
+const activeSessions = new Set<ListenSession>();
+
+/**
+ * Start listening for voice input and return the recognized text, or reject on error.
+ * Ensures only one transcript is sent per session and respects abort signals.
+ */
+export async function listenForVoice(abortSignal?: AbortSignal): Promise<string> {
+  const session: ListenSession = {
+    aborted: false,
+    recognition: null,
+    stream: null,
+    timeoutHandle: null,
+  };
+
+  activeSessions.add(session);
+
+  // Handle external abort
+  const abortHandler = () => {
+    session.aborted = true;
+  };
+  abortSignal?.addEventListener('abort', abortHandler);
 
   try {
     // Check prerequisites first (does not acquire stream)
@@ -33,49 +58,67 @@ export async function listenForVoice(): Promise<string> {
     }
 
     // Request microphone access
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    session.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
     // Initialize speech recognition
     const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
     if (!SpeechRecognition) {
-      stream.getTracks().forEach((track) => track.stop());
+      session.stream.getTracks().forEach((track) => track.stop());
       throw new Error('Speech Recognition API not available');
     }
 
-    recognition = new SpeechRecognition();
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
+    session.recognition = new SpeechRecognition();
+    session.recognition.continuous = false;
+    session.recognition.interimResults = true;
+    session.recognition.lang = 'en-US';
 
     return new Promise((resolve, reject) => {
       let finalTranscript = '';
-      let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+      let settled = false;
 
       const cleanup = () => {
-        if (timeoutHandle) clearTimeout(timeoutHandle);
-        if (stream) {
-          stream.getTracks().forEach((track) => track.stop());
+        settled = true;
+        if (session.timeoutHandle) clearTimeout(session.timeoutHandle);
+        if (session.stream) {
+          session.stream.getTracks().forEach((track) => track.stop());
         }
-        if (recognition) {
+        if (session.recognition) {
           try {
-            recognition.stop();
+            session.recognition.abort();
           } catch {
             // Already stopped
           }
         }
       };
 
+      const safeResolve = (value: string) => {
+        if (!settled && !session.aborted) {
+          settled = true;
+          cleanup();
+          resolve(value);
+        }
+      };
+
+      const safeReject = (error: Error) => {
+        if (!settled && !session.aborted) {
+          settled = true;
+          cleanup();
+          reject(error);
+        }
+      };
+
       // Set timeout to prevent indefinite hanging
-      timeoutHandle = setTimeout(() => {
-        cleanup();
-        reject(new Error('🎧 Listening timeout. No speech detected in time.'));
+      session.timeoutHandle = setTimeout(() => {
+        safeReject(new Error('🎧 Listening timeout. No speech detected in time.'));
       }, LISTEN_TIMEOUT_MS);
 
-      recognition.onstart = () => {
+      session.recognition.onstart = () => {
         // Listening started
       };
 
-      recognition.onresult = (event: any) => {
+      session.recognition.onresult = (event: any) => {
+        if (session.aborted) return;
+
         let interimTranscript = '';
         for (let i = event.resultIndex; i < event.results.length; i++) {
           const transcript = event.results[i][0].transcript;
@@ -87,43 +130,66 @@ export async function listenForVoice(): Promise<string> {
         }
       };
 
-      recognition.onerror = (event: any) => {
-        cleanup();
-        reject(new Error(micErrorLine(event.error)));
+      session.recognition.onerror = (event: any) => {
+        safeReject(new Error(micErrorLine(event.error)));
       };
 
-      recognition.onend = () => {
-        cleanup();
+      session.recognition.onend = () => {
         const text = finalTranscript.trim();
         if (text) {
-          resolve(text);
+          safeResolve(text);
         } else {
-          reject(new Error('🎧 No speech detected. Try again.'));
+          safeReject(new Error('🎧 No speech detected. Try again.'));
         }
       };
 
-      recognition.start();
+      session.recognition.start();
     });
   } catch (e) {
     // Ensure cleanup on any error
-    if (stream) {
-      stream.getTracks().forEach((track) => track.stop());
+    if (session.stream) {
+      session.stream.getTracks().forEach((track) => track.stop());
     }
-    if (recognition) {
+    if (session.recognition) {
       try {
-        recognition.stop();
+        session.recognition.abort();
       } catch {
         // Already stopped
       }
     }
     const err = e instanceof Error ? e.message : String(e);
     throw new Error(err.includes('🎙️') || err.includes('🎧') ? err : micErrorLine(err));
+  } finally {
+    abortSignal?.removeEventListener('abort', abortHandler);
+    activeSessions.delete(session);
   }
+}
+
+/** Abort all active listening sessions. Used for cleanup on unmount/navigation. */
+export function abortAllListening(): void {
+  for (const session of activeSessions) {
+    session.aborted = true;
+    if (session.timeoutHandle) {
+      clearTimeout(session.timeoutHandle);
+    }
+    if (session.stream) {
+      session.stream.getTracks().forEach((track) => track.stop());
+    }
+    if (session.recognition) {
+      try {
+        session.recognition.abort();
+      } catch {
+        // Already stopped
+      }
+    }
+  }
+  activeSessions.clear();
 }
 
 /** Enable or disable hands-free mode after checking prerequisites. */
 export async function setHandsFree(enabled: boolean, ceoVoiceProvider: string): Promise<{ ok: boolean; message: string }> {
   if (!enabled) {
+    abortAllListening();
     return { ok: true, message: '' };
   }
 
