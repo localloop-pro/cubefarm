@@ -9,7 +9,7 @@ import { closeOverlay } from './Overlays';
 import { Games, type GameId } from './games/Games';
 import { effectiveModel } from '../../../shared/models';
 import { playVoiceReply, stopVoiceReply } from './voiceReply';
-import { setHandsFree, listenForVoice } from './handsFree';
+import { setHandsFree, listenForVoice, abortAllListening } from './handsFree';
 
 // The manager's phone: text the CEO, decide on hires, see the whole company at a glance
 // without walking anywhere, and play a game while the team works. Press P anywhere in the office.
@@ -166,7 +166,9 @@ function Chat() {
   const [handsFreeProblem, setHandsFreeProblem] = useState('');
   const scroller = useRef<HTMLDivElement>(null);
   const lastCeoMessageId = useRef<number | null>(null);
-  const listeningPromiseRef = useRef<Promise<any> | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const listeningIdRef = useRef<number>(0);
+  const isActiveRef = useRef(true);
 
   // Reading the thread marks it read.
   useEffect(() => {
@@ -180,15 +182,21 @@ function Chat() {
     if (last && last.id !== lastCeoMessageId.current) {
       lastCeoMessageId.current = last.id;
       // Play voice reply
-      void playVoiceReply(last.text, settings.ceoVoiceProvider);
-      // Trigger hands-free if enabled and CEO is not currently working
-      if (settings.handsFreeModeEnabled && ceo && !isBusy(ceo)) {
-        startHandsFreeListen();
-      }
+      void playVoiceReply(last.text, settings.ceoVoiceProvider).then(() => {
+        // Only start hands-free if enabled and CEO is not busy and component is still mounted
+        if (settings.handsFreeModeEnabled && ceo && !isBusy(ceo) && isActiveRef.current && text === '') {
+          startHandsFreeListen();
+        }
+      });
     }
-  }, [messages, settings.ceoVoiceProvider, settings.handsFreeModeEnabled, ceo]);
+  }, [messages, settings.ceoVoiceProvider, settings.handsFreeModeEnabled, ceo, text]);
 
   const startHandsFreeListen = async () => {
+    // Abort any previous listening session
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
     // First validate prerequisites
     const problem = await setHandsFree(true, settings.ceoVoiceProvider);
     if (!problem.ok) {
@@ -197,20 +205,34 @@ function Chat() {
       return;
     }
 
-    // Prerequisites OK, now start listening
-    const listenPromise = (async () => {
-      try {
-        const recognizedText = await listenForVoice();
-        // Auto-submit the recognized text
+    // Verify conditions one more time before listening
+    if (!isActiveRef.current || text !== '' || !ceo || isBusy(ceo)) {
+      return;
+    }
+
+    // Create new abort controller for this listening session
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
+    const listeningId = ++listeningIdRef.current;
+
+    try {
+      const recognizedText = await listenForVoice(abortController.signal);
+      // Only send if component is still active, this is the latest session, and text hasn't changed
+      if (isActiveRef.current && listeningId === listeningIdRef.current && text === '') {
         send(recognizedText);
-      } catch (e) {
+      }
+    } catch (e) {
+      // Only show error if component is still active and this was the latest session
+      if (isActiveRef.current && listeningId === listeningIdRef.current) {
         const err = e instanceof Error ? e.message : String(e);
         setHandsFreeProblem(err);
         setTimeout(() => setHandsFreeProblem(''), 5000);
       }
-    })();
-
-    listeningPromiseRef.current = listenPromise;
+    } finally {
+      if (abortControllerRef.current === abortController) {
+        abortControllerRef.current = null;
+      }
+    }
   };
 
   useLayoutEffect(() => {
@@ -218,15 +240,15 @@ function Chat() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, info.job?.kind]);
 
-  // Cleanup on unmount
+  // Cleanup on unmount and disable hands-free if user manually edits text
   useEffect(() => {
     return () => {
+      isActiveRef.current = false;
       stopVoiceReply();
-      // Cancel any ongoing listening promise
-      if (listeningPromiseRef.current) {
-        // Promise will resolve/reject on its own when recognition ends
-        listeningPromiseRef.current = null;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
       }
+      abortAllListening();
     };
   }, []);
 
@@ -235,7 +257,10 @@ function Chat() {
     const body = t.trim();
     if (!body) return;
     setText('');
-    stopVoiceReply(); // Stop any ongoing voice reply when user types
+    stopVoiceReply();
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
     void attempt(() => api.messageCeo(body));
   };
   const replying = ceo.status === 'working' && info.job?.kind === 'chat';
@@ -296,7 +321,20 @@ function Chat() {
           send(text);
         }}
       >
-        <MessageBox value={text} onChange={(v) => { setText(v); stopVoiceReply(); }} placeholder={`Message ${ceo.name}…`} aria-label={`Message ${ceo.name}`} title="Enter sends · Shift+Enter adds a new line" autoFocus />
+        <MessageBox
+          value={text}
+          onChange={(v) => {
+            setText(v);
+            stopVoiceReply();
+            if (abortControllerRef.current) {
+              abortControllerRef.current.abort();
+            }
+          }}
+          placeholder={`Message ${ceo.name}…`}
+          aria-label={`Message ${ceo.name}`}
+          title="Enter sends · Shift+Enter adds a new line"
+          autoFocus
+        />
         <MicButton value={text} onChange={setText} disabled={!ceo} />
         <button className="btn btn-small btn-good" disabled={!text.trim()}>
           Send
