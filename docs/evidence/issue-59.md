@@ -11,7 +11,7 @@ Four cases cover CLOSED/MERGED historical issue PRs both inside/outside the boar
 - Recovery matrix: **29 passed**. Focused safety/recovery: **141 passed**, 7 files. Full suite: **438 passed**, 1 existing todo, 36 files.
 - Typecheck, build and whitespace checks pass; existing large-chunk warning remains.
 - [Latest timing artifact](issue-59-review-timings.txt) identifies the tested SHA and per-scenario observations.
-- Disposable demo smoke on frontend 5231/backend 15231 rechecked the manager settings view; zero console errors and three existing dependency warnings. [Screenshot](issue-59-review-settings.png). Demo stopped. Real recovery behavior is established by on-disk tests; no production interaction occurred.
+- Disposable demo smoke on frontend 5231/backend 15231 rechecked office entry/lobby; zero console errors and three existing dependency warnings. The attempted Settings button lookup did not match and is not counted as a successful settings re-test. [Lobby screenshot](issue-59-review-lobby.png). The earlier successful owner-settings review remains recorded below. Demo stopped. Real recovery behavior is established by on-disk tests; no production interaction occurred.
 - Automated review could not re-run because the review service reported its usage limit. Independent QA re-test remains pending; no CI green or merge is claimed.
 
 
