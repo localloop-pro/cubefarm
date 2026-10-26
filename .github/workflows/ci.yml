@@ -45,7 +45,7 @@ jobs:
   # The built app in a real browser: a demo office boots, renders, and its panels open (e2e/, Playwright).
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
 
@@ -62,8 +62,14 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
       # With the browser cached this only installs its system libraries.
-      - run: npx playwright install --with-deps chromium
+      # Retry once if it fails (network timeouts can be transient)
+      - name: Install Playwright browsers
+        run: |
+          npx playwright install --with-deps chromium || \
+          (echo "First attempt timed out, retrying..." && npx playwright install --with-deps chromium)
 
       # playwright.config.ts builds the app and boots a demo office on a test port with a temp SWARM_HOME.
       - run: npm run test:e2e
