@@ -4,6 +4,7 @@ import { isBusy, pendingRequests, qaKey, unreadMessages, useStore, type PhoneTab
 import { CEO_ID, type HireRequestView, type PhoneMessage } from '../../../shared/types';
 import { Markdown } from './Markdown';
 import { MessageBox } from './MessageBox';
+import { MicButton } from './MicButton';
 import { closeOverlay } from './Overlays';
 import { Games, type GameId } from './games/Games';
 import { effectiveModel } from '../../../shared/models';
@@ -237,6 +238,7 @@ function Chat() {
         }}
       >
         <MessageBox value={text} onChange={setText} placeholder={`Message ${ceo.name}…`} aria-label={`Message ${ceo.name}`} title="Enter sends · Shift+Enter adds a new line" autoFocus />
+        <MicButton value={text} onChange={setText} disabled={!ceo} />
         <button className="btn btn-small btn-good" disabled={!text.trim()}>
           Send
         </button>
