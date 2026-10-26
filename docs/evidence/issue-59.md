@@ -1,5 +1,25 @@
 # Issue #59 local validation record
 
+## QA round 1 follow-up (current)
+
+Implementation/test SHA: **e993ffecb82a8991c74f67654d2b7fc1036da5cd**. Documentation/evidence follows in a separate commit. Fork `origin/main` was fetched and merged; it was already included.
+
+[Brendan's failed review](https://github.com/localloop-pro/cubefarm/pull/60#issuecomment-6405504910) correctly found that targeted terminal PR details were handled only for issue tasks, allowing a fix writer to resume. Four new regressions also exposed a stale `fixing` record when terminal PRs were visible on the board. All four failed before the fix.
+
+Recovery and board reconciliation now share terminal-fix handling: no fix writer resumes, the task clears, and its QA record leaves the actionable pipeline. The complete saved QA record (including summary, checks and evidence URLs) is retained in the developer's checkpoint log, alongside the explicit CLOSED or MERGED outcome. The worktree is neither prepared nor reset. Existing bounded log retention still applies; operators should archive evidence before subsequent work trims the log.
+
+Verification at this SHA:
+
+- Four real writeState/init/recover regressions: CLOSED/MERGED × hidden/visible board. Each checks zero session starts, no actionable QA record, untouched dirty content, unchanged owner gates, and evidence surviving another write/restart.
+- Recovery matrix: **26 passed**. Focused recovery/safety suites: **138 passed**, 7 files.
+- Full suite: **435 passed**, 1 existing todo, 36 files. Typecheck and build pass; existing large-chunk warning remains. `git diff --check` passes; no lint script exists.
+- [Updated per-scenario timings](issue-59-round2-timings.txt): measured process restart cases 979 ms / 405 ms; fake-backend recovery measurements are not production SLAs.
+- Disposable Playwright demo on frontend 5231/backend 15231 rechecked paused scheduling, session limit 2 and manager approval, with zero console errors and three existing dependency warnings. [Fresh screenshot](issue-59-round2-settings.png). Demo stopped. Terminal fix outcomes are verified by the four on-disk regressions, not this generic UI smoke check.
+
+Current tracking: QA blocker implemented and locally validated; PR #60 awaits independent re-test. No new PR, production service operation, real agent, GitHub merge or deployment. The original validation below is historical and did not cover the terminal-fix gap.
+
+## Initial submission (historical)
+
 Implementation/test SHA: **02284c6f459de349331758cc24a28636ee88cdc7** on `swarm/issue-59-karen`, based on fork `origin/main`. The subsequent documentation commit adds this record, the runbook, README link and screenshots; it changes no implementation or tests.
 
 Date: 2026-10-26, Australia/Sydney. Independent QA and manager acceptance remain pending. No production recovery claim is made.

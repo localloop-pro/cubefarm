@@ -9,7 +9,8 @@ The Featured spec, approved plan, `Featured_todo.md`, and `Featured_done.db` are
 - Completed: inspect real persistence/startup/recovery and existing safety tests.
 - Completed: execute the disposable interruption matrix, reproduce failures, apply narrow recovery fixes, and rerun regression.
 - Completed: disposable Playwright demo review of restored task, QA status and owner gates; retain screenshots below.
-- Pending: independent teammate QA of the PR and manager disposition. No merge or deployment is authorized here.
+- Completed: QA round 1 terminal-fix follow-up, including hidden/visible CLOSED/MERGED regressions and preservation of the QA record in checkpoint logs.
+- Pending: independent teammate QA re-test of PR #60 and manager disposition. No merge or deployment is authorized here.
 - Unverified operational exercises are listed under Boundaries; they are not local test passes or newly approved work.
 
 ## Reproduce safely
@@ -75,6 +76,7 @@ Enter and press E at the board. #3 remains stopped/in progress; PR #7 says “ne
 | Interrupted QA after checkpoint | Requeued while paused, fresh head read on resume, old run never accepted; one new QA session on repeated scheduling. |
 | Fake PR succeeds before local acknowledgement | Startup fetch discovers it and queues QA; issue writer does not resume/create another PR. |
 | Fake PR is CLOSED or MERGED before acknowledgement | Remote state is reconciled, task clears without another writer or merge; closure is not claimed as a merge. |
+| Terminal fix PR, hidden from or visible on the board | CLOSED/MERGED clears the task and active QA record without writer replay; complete QA evidence and explicit outcome survive in the developer checkpoint log and another restart; dirty file unchanged. |
 | Fake PR outside bounded board window | Targeted branch lookup and PR details precede recovery; no writer replay. |
 | Board read or targeted read unavailable | Task remains stopped and owned; no writer starts and no completion is inferred. |
 | Fake merge succeeds then acknowledgement throws | Restart reads fake MERGED state, removes finished QA, never repeats the merge. |
@@ -98,6 +100,8 @@ These are instructions for an authorized recovery operator, not commands execute
 4. For an existing open PR, continue QA on its current head rather than opening a replacement. A saved QA pass covers only its `passedSha`; a changed head requires a new QA run. For a remotely merged PR, reconcile the completed remote outcome; for a closed PR, decide whether further work is wanted rather than labelling it merged.
 5. A stopped issue/fix with a saved session can be resumed explicitly through its existing desk after inspection. A task held for missing session/branch needs manual worktree review: preserve changes first, then deliberately clear/reassign with the manager's controls if appropriate. Do not bypass pending hire approvals, needs-human QA, auto-merge settings or capacity limits. Pause blocks autonomous recovery; removing pause does not automatically replay held stopped sessions.
 6. Record the remote IDs, tested/current SHA, operator decision and preserved evidence. Resume only after a single owner/writer is established. Unsupported outcomes stay unresolved; no “done” entry merely because a process restarted.
+
+Terminal fix records leave the active QA pipeline after confirmed closure/merge. Their complete QA evidence is copied into the developer log before removal; archive that evidence before normal bounded-log trimming removes old entries. CLOSED is logged as CLOSED, never as a successful merge.
 
 Read-only inspection examples (replace placeholders; no mutation is implied):
 
