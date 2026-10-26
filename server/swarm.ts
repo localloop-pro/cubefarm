@@ -638,6 +638,10 @@ export class Swarm {
           }
         }
         if (this.paused()) continue; // manager paused during the targeted read
+        if (a.task === 'fix' && pr && pr.state !== 'OPEN') {
+          this.reconcileTerminalFix(a, pr);
+          continue;
+        }
         if (a.task === 'issue' && pr) {
           Object.assign(a, { prNumber: pr.number, prUrl: pr.url });
           if (pr.state === 'OPEN') {
@@ -1305,12 +1309,29 @@ export class Swarm {
     if (this.repoRt.has(id)) this.emitRepo(repo);
   }
 
+  /** Retire a terminal fix without replaying its writer or discarding its saved QA evidence. */
+  private reconcileTerminalFix(a: PersistedAgent, pr: Pick<PrDetails, 'number' | 'state'>) {
+    this.appendLog(a, [{ kind: 'system', text: `Recovery reconciled fix PR #${pr.number}: ${pr.state}. No fix session replayed.` }]);
+    for (const q of this.state.qa.filter((q) => q.repoId === a.repoId && q.prNumber === pr.number)) {
+      // Terminal PRs leave the actionable pipeline, but their report/URLs/checks survive in the checkpoint log.
+      this.appendLog(a, [{ kind: 'system', text: `Recovery retained QA evidence for PR #${pr.number}: ${JSON.stringify(q)}` }]);
+      this.state.qa = this.state.qa.filter((x) => x !== q);
+      this.broadcast({ type: 'qaRemoved', repoId: a.repoId, prNumber: pr.number });
+    }
+    this.clearTask(a); // metadata only: never prepare, reset or remove the interrupted worktree
+    this.save();
+  }
+
   /** Keep agents and QA records in step with what happened to PRs on GitHub. */
   private reconcilePulls(repo: PersistedRepo, pulls: PullInfo[]) {
     for (const a of this.state.agents) {
       if (a.repoId !== repo.id || a.role !== 'dev' || a.prNumber == null || BUSY.includes(a.status) || a.status === 'idle') continue;
       const pr = pulls.find((p) => p.number === a.prNumber);
       if (!pr || pr.state === 'OPEN') continue;
+      if (a.task === 'fix') {
+        this.reconcileTerminalFix(a, pr);
+        continue;
+      }
       if (a.task === 'qa') {
         this.clearTask(a); // they only tested it
         continue;

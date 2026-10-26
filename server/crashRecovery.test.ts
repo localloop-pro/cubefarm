@@ -231,6 +231,40 @@ describe('on-disk crash/restart matrix', () => {
     expect(remote.merges).toBe(0);
   });
 
+  it.each([
+    ['CLOSED', true], ['MERGED', true], ['CLOSED', false], ['MERGED', false],
+  ])('fix recovery reconciles %s (hidden from board: %s) without replay or evidence loss', async (state, hideFromBoard) => {
+    const { s, a } = await seed();
+    task(a, 'fix');
+    const evidence = record(s, { status: 'fixing', devAgentId: a.id, commentUrl: 'https://example.invalid/evidence', checks: [{ name: 'saved check', result: 'fail' }] });
+    await fs.mkdir(calls.deskDir(), { recursive: true });
+    const dirty = path.join(calls.deskDir(), 'terminal-fix.txt');
+    await fs.writeFile(dirty, 'preserve interrupted fix');
+    await s.writeState();
+    remote.pulls = [pull({ state })]; remote.hideFromBoard = hideFromBoard;
+    const b = await restart(`fix:terminal:${state}:hidden=${hideFromBoard}`);
+    if (hideFromBoard) {
+      expect(calls.prDetails).toHaveBeenCalledWith(repoId, 7);
+      expect(remote.events).toEqual(['read-pulls', 'read-details']);
+    }
+    b.schedule(); b.schedule(); await settle();
+    expect(calls.startSession).not.toHaveBeenCalled();
+    expect(calls.prepareDesk).not.toHaveBeenCalled();
+    expect(calls.mergePull).not.toHaveBeenCalled();
+    expect(b.state.agents.find((x: Any) => x.id === a.id)).toMatchObject({ status: 'idle', task: null });
+    expect(b.state.qa).toHaveLength(0);
+    expect(await fs.readFile(dirty, 'utf8')).toBe('preserve interrupted fix');
+    const log = b.snapshot().agents.find((x: Any) => x.id === a.id).log;
+    expect(log).toContainEqual(expect.objectContaining({ text: `Recovery reconciled fix PR #7: ${state}. No fix session replayed.` }));
+    expect(log).toContainEqual(expect.objectContaining({ text: `Recovery retained QA evidence for PR #7: ${JSON.stringify(evidence)}` }));
+    gates(b);
+    await b.writeState();
+    const c = await restart(`fix:terminal:${state}:second-restart:hidden=${hideFromBoard}`);
+    expect(c.state.qa).toHaveLength(0);
+    expect(calls.startSession).not.toHaveBeenCalled();
+    expect(c.snapshot().agents.find((x: Any) => x.id === a.id).log).toEqual(log);
+  });
+
   it('a PR outside the bounded board is found by targeted remote lookup before replay', async () => {
     const { s, a } = await seed(); task(a); await s.writeState();
     remote.pulls = [pull()]; remote.hideFromBoard = true;
