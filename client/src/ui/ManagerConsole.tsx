@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { PreviewPill, PreviewSettings } from './AppViewer';
+import { VoiceSettings } from './VoiceSettings';
 import { agentsOnRepo, pendingRequests, useStore, type ManagerTab } from '../store';
 import { CEO_ID, type AgentCli, type CliView, type EffortLevel, type OfficeUpdateView, type RepoView } from '../../../shared/types';
 import { effectiveModel } from '../../../shared/models';
@@ -751,6 +752,10 @@ function SettingsTab() {
           <input type="number" min={0} max={1440} defaultValue={settings.ceoHeartbeatMin} onBlur={(e) => set({ ceoHeartbeatMin: Number(e.target.value) })} />
         </label>
         <p className="muted small">A review is skipped when nothing changed since the last one. The CEO's own model and effort are on the CEO tab.</p>
+      </div>
+      <div className="card">
+        <h3>🎙️ Voice</h3>
+        <VoiceSettings />
       </div>
       <div className="card">
         <h3>⌨️ How agents run</h3>
