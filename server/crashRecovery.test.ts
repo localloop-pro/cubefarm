@@ -221,13 +221,17 @@ describe('on-disk crash/restart matrix', () => {
     expect(b.state.qa).toHaveLength(0);
   });
 
-  it.each(['CLOSED', 'MERGED'])('uncertain PR outcome reconciles %s without reopening work', async (state) => {
+  it.each([['CLOSED', true], ['MERGED', true], ['CLOSED', false], ['MERGED', false]])('an unacknowledged %s PR on a reused issue branch holds ownership (hidden: %s)', async (state, hideFromBoard) => {
     const { s, a } = await seed(); task(a); await s.writeState();
-    remote.pulls = [pull({ state })];
-    const b = await restart(`PR:external-outcome:${state}`);
+    remote.pulls = [pull({ state })]; remote.hideFromBoard = hideFromBoard;
+    a.startedAt = Date.now(); // a new attempt may have reused a branch with a historical terminal PR
+    await s.writeState();
+    const b = await restart(`PR:ambiguous-terminal-branch:${state}:hidden=${hideFromBoard}`);
     expect(calls.startSession).not.toHaveBeenCalled();
-    expect(b.state.agents.find((x: Any) => x.id === a.id)).toMatchObject({ status: 'idle', task: null });
+    expect(b.state.agents.find((x: Any) => x.id === a.id)).toMatchObject({ status: 'stopped', task: 'issue', issueNumber: 3, sessionId: 'saved-session' });
     expect(b.state.qa).toHaveLength(0);
+    expect(b.issueTaken(b.state.repos[0], 3)).toBe(true);
+    expect(calls.prepareDesk).not.toHaveBeenCalled();
     expect(remote.merges).toBe(0);
   });
 
@@ -263,6 +267,18 @@ describe('on-disk crash/restart matrix', () => {
     expect(c.state.qa).toHaveLength(0);
     expect(calls.startSession).not.toHaveBeenCalled();
     expect(c.snapshot().agents.find((x: Any) => x.id === a.id).log).toEqual(log);
+  });
+
+  it('saved PR identity takes precedence over a historical PR sharing its branch', async () => {
+    const { s, a } = await seed(); task(a, 'fix');
+    record(s, { status: 'fixing', devAgentId: a.id });
+    remote.pulls = [pull({ number: 6, state: 'CLOSED' }), pull()];
+    await s.writeState();
+    const b = await restart('fix:exact-pr-before-branch');
+    expect(calls.startSession).toHaveBeenCalledTimes(1);
+    expect(b.state.agents.find((x: Any) => x.id === a.id)).toMatchObject({ status: 'working', task: 'fix', prNumber: 7 });
+    expect(b.state.qa[0]).toMatchObject({ prNumber: 7, status: 'fixing' });
+    expect(calls.prDetails).not.toHaveBeenCalled();
   });
 
   it('a PR outside the bounded board is found by targeted remote lookup before replay', async () => {

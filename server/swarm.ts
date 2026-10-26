@@ -626,7 +626,7 @@ export class Swarm {
           this.appendLog(a, [{ kind: 'error', text: 'Recovery held: remote PR state could not be verified. Preserve this desk and reconcile GitHub before resuming.' }]);
           continue;
         }
-        let pr: Pick<PrDetails, 'number' | 'url' | 'state' | 'isDraft'> | undefined = rt.pulls.find((p) => p.headRefName === a.branch || p.number === a.prNumber);
+        let pr: Pick<PrDetails, 'number' | 'url' | 'state' | 'isDraft'> | undefined = rt.pulls.find((p) => a.prNumber != null ? p.number === a.prNumber : p.headRefName === a.branch);
         if (!pr) {
           try {
             // The board lists only 50 open and 8 merged PRs, and no closed PRs. Absence there proves nothing.
@@ -638,6 +638,11 @@ export class Swarm {
           }
         }
         if (this.paused()) continue; // manager paused during the targeted read
+        if (a.task === 'issue' && a.prNumber == null && pr && pr.state !== 'OPEN') {
+          // Issue branches are reused on reassignment. A historical terminal PR cannot identify this attempt.
+          this.appendLog(a, [{ kind: 'system', text: `Recovery held: branch PR #${pr.number} is ${pr.state}, but this attempt has no saved PR identity. Inspect the worktree and remote history before clearing or resuming it.` }]);
+          continue;
+        }
         if (a.task === 'fix' && pr && pr.state !== 'OPEN') {
           this.reconcileTerminalFix(a, pr);
           continue;
