@@ -47,7 +47,7 @@ export default defineConfig({
   ],
   webServer: {
     command: 'npm run build && node --import tsx server/index.ts --demo',
-    url: `http://127.0.0.1:${PORT}/api/state`,
+    url: `http://127.0.0.1:${PORT}/api/session`,
     env: { SWARM_HOME: process.env.E2E_SWARM_HOME, SWARM_PORT: String(PORT) },
     // Never attach to a server that's already there: it could be someone's office.
     reuseExistingServer: false,

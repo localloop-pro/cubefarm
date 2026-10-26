@@ -1,10 +1,24 @@
 import { useStore } from './store';
 import type { AgentCli, GhRepoSummary, OfficeUpdateView, PreviewView, ProjectFolderView, RepoView, SwarmSettings } from '../../shared/types';
 
+let sessionToken: string | null = null;
+
+async function getSessionToken(): Promise<string> {
+  if (sessionToken) return sessionToken;
+  const res = await fetch('/api/session');
+  const data = (await res.json()) as { token: string };
+  sessionToken = data.token;
+  return sessionToken;
+}
+
 async function call<T = unknown>(method: string, url: string, body?: unknown): Promise<T> {
+  const token = await getSessionToken();
   const res = await fetch(url, {
     method,
-    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    headers: {
+      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      'X-Session-Token': token,
+    },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => ({}));

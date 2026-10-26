@@ -72,8 +72,12 @@ async function canvasColours(page: Page) {
   return colourStats(decodePng(png));
 }
 
-test('/api/state returns JSON with floors', async ({ request }) => {
-  const res = await request.get('/api/state');
+test('/api/state returns JSON with floors', async ({ request, baseURL }) => {
+  const sessionRes = await request.get(`${baseURL}/api/session`);
+  const { token } = await sessionRes.json();
+  const res = await request.get(`${baseURL}/api/state`, {
+    headers: { 'X-Session-Token': token },
+  });
   expect(res.ok()).toBe(true);
   expect(res.headers()['content-type']).toContain('application/json');
   const state = await res.json();
