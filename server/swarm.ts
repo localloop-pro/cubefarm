@@ -594,7 +594,7 @@ export class Swarm {
       this.previews.clearOrphans(this.state.repos),
     ]);
     for (const r of this.state.repos) void this.previews.refreshDefault(r);
-    this.recover(interrupted);
+    await this.recover(interrupted);
     this.officeHead = await this.backend.office.head();
     const updated = await this.backend.office.takeLastUpdate().catch(() => null);
     if (updated) await this.reportUpdate(updated);
@@ -613,8 +613,50 @@ export class Swarm {
   }
 
   /** Agents cut off by a server restart pick their Claude Code session back up (QA and demo agents start over). */
-  private recover(agents: PersistedAgent[]) {
+  private async recover(agents: PersistedAgent[]) {
     for (const a of agents) {
+      if (!a.task) continue; // startup reconciliation may already have cleared a closed/merged PR
+      if (!this.backend.demo && a.task !== 'qa') {
+        if (this.paused()) continue; // retain the manager's held task for explicit reconciliation/resume
+        const repo = this.state.repos.find((r) => r.id === a.repoId);
+        const rt = this.repoRt.get(a.repoId);
+        // A lost acknowledgement can hide a successful PR creation. Read remote state before resuming a writer.
+        // A failed read is uncertainty, not evidence that the operation failed.
+        if (!repo || rt?.lastSync == null || rt.syncError) {
+          this.appendLog(a, [{ kind: 'error', text: 'Recovery held: remote PR state could not be verified. Preserve this desk and reconcile GitHub before resuming.' }]);
+          continue;
+        }
+        let pr: Pick<PrDetails, 'number' | 'url' | 'state' | 'isDraft'> | undefined = rt.pulls.find((p) => p.headRefName === a.branch || p.number === a.prNumber);
+        if (!pr) {
+          try {
+            // The board lists only 50 open and 8 merged PRs, and no closed PRs. Absence there proves nothing.
+            const found = a.prNumber ? { number: a.prNumber } : a.branch ? await this.backend.prForBranch(repo.fullName, a.branch) : null;
+            if (found) pr = await this.backend.prDetails(repo.fullName, found.number);
+          } catch {
+            this.appendLog(a, [{ kind: 'error', text: 'Recovery held: the task PR could not be verified. Check its remote branch/PR before resuming.' }]);
+            continue;
+          }
+        }
+        if (this.paused()) continue; // manager paused during the targeted read
+        if (a.task === 'issue' && pr) {
+          Object.assign(a, { prNumber: pr.number, prUrl: pr.url });
+          if (pr.state === 'OPEN') {
+            a.status = 'done'; // handed off, not merged; the remote PR is authoritative
+            if (!pr.isDraft) this.queueQa(repo, pr.number, a, a.issueNumber);
+            this.emitAgent(a);
+          } else this.clearTask(a);
+          this.appendLog(a, [{ kind: 'system', text: `Recovery reconciled PR #${pr.number}: ${pr.state}. No issue session replayed.` }]);
+          continue;
+        }
+        if (!a.sessionId || !a.branch) {
+          // Preparation may have left dirty work even though the session ID never reached a checkpoint.
+          // Retain ownership for manual recovery rather than assigning a second writer or resetting the desk.
+          const fix = this.state.qa.find((q) => q.devAgentId === a.id && q.status === 'fixing');
+          if (fix) this.setQa(fix, { status: 'needs-human' });
+          this.appendLog(a, [{ kind: 'error', text: 'Recovery held: no durable session/branch to resume. Inspect the saved desk before clearing or reassigning this task.' }]);
+          continue;
+        }
+      }
       if (a.task === 'qa' || this.backend.demo || !a.sessionId || !a.branch) {
         this.appendLog(a, [{ kind: 'system', text: '↺ The office server restarted. Starting over from the queue.' }]);
         const rec = a.task === 'qa' ? this.state.qa.find((q) => q.qaAgentId === a.id && q.status === 'testing') : undefined;
@@ -2569,7 +2611,7 @@ export class Swarm {
       if (rt) Object.assign(rt, { session: null, currentTool: null });
     }
     this.ensureCeo(interrupted);
-    this.recover(interrupted);
+    await this.recover(interrupted);
     interrupted.forEach((a) => this.emitAgent(a));
     await this.reportUpdate(result);
     if (!result.ok) u.failedBehind = u.behind;
