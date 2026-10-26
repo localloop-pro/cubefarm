@@ -33,7 +33,7 @@ await fs.writeFile(gitConfig, '[user]\n\tname = Sync Test\n\temail = sync-test@e
 process.env.GIT_CONFIG_GLOBAL = gitConfig;
 
 const { git } = await import('./exec.ts');
-const { leftoversInDesk, mainDir, syncMain: sync } = await import('./workspace.ts');
+const { deskIsDirty, leftoversInDesk, mainDir, prepareDesk, removeDesk, syncMain: sync } = await import('./workspace.ts');
 // Most tests only care about the status line.
 const syncMain = async (...args: Parameters<typeof sync>) => (await sync(...args))?.status ?? null;
 
@@ -245,5 +245,88 @@ describe('leftoversInDesk', () => {
       `  8 node ${winDesk}\\server.js`,
     ].join('\n');
     expect(leftoversInDesk(listing, winDesk, winKeep)).toEqual([8]);
+  });
+});
+
+describe('desk preservation on reuse and removal', { timeout: 60_000 }, () => {
+  async function createDeskWithWork(fullName: string, agentSlug: string, hasUncommitted: boolean, hasUnpushed: boolean): Promise<string> {
+    const dir = mainDir(fullName);
+    const repoPath = path.join(dir, '..', 'desks');
+    const wt = path.join(repoPath, agentSlug);
+
+    // Set up the worktree on main branch
+    await fs.mkdir(repoPath, { recursive: true });
+    await git(['worktree', 'add', '-b', `swarm/issue-prep-${agentSlug}`, wt, 'origin/main'], { cwd: dir });
+
+    if (hasUnpushed) {
+      // Create an unpushed commit
+      await commitFile(wt, 'unpushed.txt', 'this commit is not pushed\n');
+    }
+
+    if (hasUncommitted) {
+      // Create an uncommitted change (stage it so it shows up in status)
+      await fs.writeFile(path.join(wt, 'work.txt'), 'uncommitted work\n');
+      await git(['add', 'work.txt'], { cwd: wt });
+    }
+
+    return wt;
+  }
+
+  it('preserves a desk with an untracked file and an unpushed commit when reused', async () => {
+    const r = await makeRepos();
+    const agentSlug = 'test-agent-01';
+    const wt = await createDeskWithWork(r.fullName, agentSlug, true, true);
+
+    // Verify dirty state
+    expect(await deskIsDirty(wt)).toBe(true);
+
+    // Prepare the desk for a new task (should preserve work and clean it)
+    const newWt = await prepareDesk(r.fullName, { defaultBranch: 'main' }, agentSlug, 'swarm/issue-1-test');
+
+    // New worktree should be clean
+    expect(await deskIsDirty(newWt)).toBe(false);
+
+    // Recovery ref should exist in the main clone
+    const main = mainDir(r.fullName);
+    const refs = await git(['for-each-ref', 'refs/office/recovered/'], { cwd: main }).catch(() => '');
+    expect(refs).toContain(agentSlug);
+  });
+
+  it('preserves desk work when removing the desk', async () => {
+    const r = await makeRepos();
+    const agentSlug = 'test-agent-02';
+    const wt = await createDeskWithWork(r.fullName, agentSlug, true, true);
+
+    // Verify dirty state
+    expect(await deskIsDirty(wt)).toBe(true);
+
+    // Remove the desk (should preserve work first)
+    await removeDesk(r.fullName, agentSlug);
+
+    // Desk directory should be gone
+    await expect(fs.access(wt)).rejects.toThrow();
+
+    // Recovery ref should exist in the main clone
+    const main = mainDir(r.fullName);
+    const refs = await git(['for-each-ref', 'refs/office/recovered/'], { cwd: main }).catch(() => '');
+    expect(refs).toContain(agentSlug);
+  });
+
+  it('produces no recovery ref for a clean desk', async () => {
+    const r = await makeRepos();
+    const agentSlug = 'test-agent-03';
+    const wt = await createDeskWithWork(r.fullName, agentSlug, false, false);
+
+    // Verify clean state
+    expect(await deskIsDirty(wt)).toBe(false);
+
+    // Remove the desk (should not preserve anything)
+    const main = mainDir(r.fullName);
+
+    await removeDesk(r.fullName, agentSlug);
+
+    const refsAfter = await git(['for-each-ref', 'refs/office/recovered/', '--format=%(refname)'], { cwd: main }).catch(() => '');
+    // Should have no new refs for this agent
+    expect(refsAfter).not.toContain(`refs/office/recovered/${agentSlug}`);
   });
 });
