@@ -1,12 +1,15 @@
 // Settings → Voice: mic check, provider settings, and voice preferences.
 
 import { useEffect, useState } from 'react';
+import { useStore } from '../store';
+import { api } from '../api';
 import { micCaps, queryMicPermission, type MicCaps } from './mic';
 import { setHandsFree } from './handsFree';
 
 export function VoiceSettings() {
   const [caps, setCaps] = useState<MicCaps | null>(null);
-  const [handsFreeEnabled, setHandsFreeEnabled] = useState(false);
+  const settings = useStore((s) => s.settings);
+  const [localHandsFree, setLocalHandsFree] = useState(false);
 
   useEffect(() => {
     const check = async () => {
@@ -16,6 +19,10 @@ export function VoiceSettings() {
     };
     void check();
   }, []);
+
+  useEffect(() => {
+    setLocalHandsFree(settings.handsFreeModeEnabled);
+  }, [settings.handsFreeModeEnabled]);
 
   const testMic = async () => {
     if (!caps) return;
@@ -29,30 +36,33 @@ export function VoiceSettings() {
   };
 
   const handleHandsFreeToggle = async (enabled: boolean) => {
-    // Get CEO voice provider from settings (currently not stored; default to 'off' for now)
-    // TODO: add ceoVoiceProvider to SwarmSettings
-    const ceoVoiceProvider = 'off';
-    const result = await setHandsFree(enabled, ceoVoiceProvider);
+    const result = await setHandsFree(enabled, settings.ceoVoiceProvider);
     if (result.ok) {
-      setHandsFreeEnabled(enabled);
+      setLocalHandsFree(enabled);
+      await api.updateSettings({ handsFreeModeEnabled: enabled });
       if (result.message) alert(result.message);
     } else {
       alert(result.message);
     }
   };
 
+  const handleVoiceProviderChange = async (provider: 'off' | 'browser') => {
+    await api.updateSettings({ ceoVoiceProvider: provider });
+  };
+
   if (!caps) return <p className="muted">Loading mic check…</p>;
 
   const permissionState = caps.permission?.state ?? 'unknown';
+  const voiceWorking = settings.ceoVoiceProvider === 'browser' && typeof speechSynthesis !== 'undefined';
 
   return (
     <div className="voice-settings">
+      <h4>🎙️ Microphone & Recognition</h4>
       <label className="toggle block">
-        <input type="checkbox" checked={handsFreeEnabled} onChange={(e) => void handleHandsFreeToggle(e.target.checked)} />
+        <input type="checkbox" checked={localHandsFree} onChange={(e) => void handleHandsFreeToggle(e.target.checked)} />
         <span>🎧 Hands-free mode: listen after each CEO reply and auto-submit</span>
       </label>
       <p className="muted small">After each reply, the office automatically listens for your voice and submits what you say.</p>
-      <h4>🎙️ Mic check</h4>
       <table className="mic-check-table">
         <tbody>
           <tr>
@@ -76,19 +86,33 @@ export function VoiceSettings() {
               {permissionState === 'unknown' && '❓ Unknown'}
             </td>
           </tr>
-          <tr>
-            <td>CEO voice provider</td>
-            <td>❌ Off</td>
-          </tr>
-          <tr>
-            <td>Listen provider</td>
-            <td>❌ Off</td>
-          </tr>
         </tbody>
       </table>
       <button className="btn btn-small" onClick={testMic}>
         Test mic
       </button>
+
+      <h4>🔊 Voice Provider</h4>
+      <label className="toggle block">
+        <input
+          type="radio"
+          name="voiceProvider"
+          value="off"
+          checked={settings.ceoVoiceProvider === 'off'}
+          onChange={() => void handleVoiceProviderChange('off')}
+        />
+        <span>Off: silent replies</span>
+      </label>
+      <label className="toggle block">
+        <input
+          type="radio"
+          name="voiceProvider"
+          value="browser"
+          checked={settings.ceoVoiceProvider === 'browser'}
+          onChange={() => void handleVoiceProviderChange('browser')}
+        />
+        <span>Browser: use this device's speech synthesis ({voiceWorking ? '✅ Available' : '❌ Not available'})</span>
+      </label>
     </div>
   );
 }

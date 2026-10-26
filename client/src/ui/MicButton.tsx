@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { cantListen } from './mic';
-import { MIC_WARMING, MIC_TIMEOUT_MS, MIC_TIMEOUT_MSG } from './micText';
+import { micErrorLine, MIC_WARMING, MIC_TIMEOUT_MS, MIC_TIMEOUT_MSG, MIC_STATUS_CLEANUP_MS } from './micText';
 
 export interface MicButtonProps {
   value: string;
@@ -13,12 +13,15 @@ export interface MicButtonProps {
 
 const TAP_MS = 300; // Hold duration to activate recording (vs toggling listen mode)
 
-export function MicButton({ disabled }: MicButtonProps) {
-  const [state, setState] = useState<'ready' | 'warming' | 'listening' | 'error'>('ready');
+export function MicButton({ value, onChange, disabled }: MicButtonProps) {
+  const [state, setState] = useState<'ready' | 'warming' | 'listening' | 'processing' | 'error'>('ready');
   const [error, setError] = useState('');
   const [showTimeout, setShowTimeout] = useState(false);
   const holdStart = useRef<number | null>(null);
   const timeoutHandle = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const statusHandle = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recognitionRef = useRef<any>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
 
   // Check if mic access is forbidden
   const problem = cantListen();
@@ -29,7 +32,26 @@ export function MicButton({ disabled }: MicButtonProps) {
       clearTimeout(timeoutHandle.current);
       timeoutHandle.current = null;
     }
+    if (statusHandle.current) {
+      clearTimeout(statusHandle.current);
+      statusHandle.current = null;
+    }
     setShowTimeout(false);
+  };
+
+  const cleanupMic = () => {
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // Already stopped or not started
+      }
+      recognitionRef.current = null;
+    }
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
   };
 
   // Show timeout message if warming takes too long
@@ -40,12 +62,82 @@ export function MicButton({ disabled }: MicButtonProps) {
     }, MIC_TIMEOUT_MS);
   };
 
+  const handleError = (err: string) => {
+    cleanup();
+    cleanupMic();
+    setError(err);
+    setState('error');
+    statusHandle.current = setTimeout(() => {
+      setState('ready');
+      setError('');
+    }, MIC_STATUS_CLEANUP_MS);
+  };
+
+  const startRecognition = async () => {
+    try {
+      // Request microphone access
+      mediaStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      // Initialize speech recognition
+      const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+      if (!SpeechRecognition) {
+        handleError(micErrorLine('Speech Recognition API not available'));
+        return;
+      }
+
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = false;
+      recognitionRef.current.interimResults = true;
+      recognitionRef.current.lang = 'en-US';
+
+      let finalTranscript = '';
+
+      recognitionRef.current.onstart = () => {
+        setState('listening');
+      };
+
+      recognitionRef.current.onresult = (event: any) => {
+        let interimTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript + ' ';
+          } else {
+            interimTranscript += transcript;
+          }
+        }
+        // Could show interim results, but for now we just capture final
+      };
+
+      recognitionRef.current.onerror = (event: any) => {
+        handleError(micErrorLine(event.error));
+      };
+
+      recognitionRef.current.onend = () => {
+        cleanupMic();
+        if (finalTranscript.trim()) {
+          setState('processing');
+          onChange(value + (value && !value.endsWith(' ') ? ' ' : '') + finalTranscript.trim());
+          setState('ready');
+        } else {
+          setState('ready');
+        }
+      };
+
+      recognitionRef.current.start();
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      handleError(micErrorLine(err));
+    }
+  };
+
   const onMouseDown = () => {
     if (micDisabled || disabled) return;
     holdStart.current = Date.now();
     setState('warming');
     setError('');
     startTimeout();
+    void startRecognition();
   };
 
   const onMouseUp = () => {
@@ -53,19 +145,13 @@ export function MicButton({ disabled }: MicButtonProps) {
     const duration = holdStart.current ? Date.now() - holdStart.current : 0;
     holdStart.current = null;
 
-    // For now, just reset state. A real implementation would start speech recognition here.
-    if (duration >= TAP_MS) {
-      setState('listening');
-    } else {
+    if (recognitionRef.current && state === 'listening') {
+      recognitionRef.current.stop();
+    } else if (duration < TAP_MS) {
       setState('ready');
+      cleanupMic();
     }
   };
-
-  // const handleError = (err: string) => {
-  //   cleanup();
-  //   setError(err);
-  //   setState('error');
-  // };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.code === 'Space' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
@@ -82,7 +168,10 @@ export function MicButton({ disabled }: MicButtonProps) {
   };
 
   useEffect(() => {
-    return cleanup;
+    return () => {
+      cleanup();
+      cleanupMic();
+    };
   }, []);
 
   const isEnabled = !micDisabled && !disabled;
@@ -93,9 +182,11 @@ export function MicButton({ disabled }: MicButtonProps) {
         : MIC_WARMING
       : state === 'listening'
         ? '🎙️ Listening…'
-        : state === 'error'
-          ? error || 'Error'
-          : '';
+        : state === 'processing'
+          ? '🎙️ Processing…'
+          : state === 'error'
+            ? error || 'Error'
+            : '';
 
   return (
     <div className="mic-button-group">
