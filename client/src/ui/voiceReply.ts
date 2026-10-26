@@ -1,40 +1,62 @@
 // Browser speech synthesis for CEO voice replies.
 
-/** Speak the CEO's reply using browser speech synthesis and return a promise that resolves when done. */
-export function playVoiceReply(text: string, provider: 'off' | 'browser'): Promise<void> {
+export type VoiceReplyOutcome = 'played' | 'skipped' | 'cancelled' | 'error' | 'unavailable';
+
+let currentUtterance: SpeechSynthesisUtterance | null = null;
+let wasCancelled = false;
+
+/** Speak the CEO's reply using browser speech synthesis and return the outcome. */
+export function playVoiceReply(text: string, provider: 'off' | 'browser'): Promise<VoiceReplyOutcome> {
   return new Promise((resolve) => {
     if (provider === 'off') {
-      resolve();
+      resolve('skipped');
       return;
     }
 
     try {
       if (!window.speechSynthesis) {
         console.warn('Speech synthesis not available');
-        resolve();
+        resolve('unavailable');
         return;
       }
 
       // Cancel any ongoing speech
       window.speechSynthesis.cancel();
+      wasCancelled = false;
 
       const utterance = new SpeechSynthesisUtterance(text);
+      currentUtterance = utterance;
       utterance.rate = 1;
       utterance.pitch = 1;
       utterance.volume = 1;
 
+      let settled = false;
+
       utterance.onend = () => {
-        resolve();
+        if (!settled) {
+          settled = true;
+          const outcome = wasCancelled ? 'cancelled' : 'played';
+          resolve(outcome);
+          if (currentUtterance === utterance) {
+            currentUtterance = null;
+          }
+        }
       };
 
       utterance.onerror = () => {
-        resolve();
+        if (!settled) {
+          settled = true;
+          resolve('error');
+          if (currentUtterance === utterance) {
+            currentUtterance = null;
+          }
+        }
       };
 
       window.speechSynthesis.speak(utterance);
     } catch (e) {
       console.warn('Voice reply error:', e instanceof Error ? e.message : String(e));
-      resolve();
+      resolve('error');
     }
   });
 }
@@ -42,6 +64,7 @@ export function playVoiceReply(text: string, provider: 'off' | 'browser'): Promi
 /** Stop any ongoing voice reply. */
 export function stopVoiceReply(): void {
   if (window.speechSynthesis) {
+    wasCancelled = true;
     window.speechSynthesis.cancel();
   }
 }

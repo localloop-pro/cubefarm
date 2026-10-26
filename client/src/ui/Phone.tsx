@@ -169,6 +169,9 @@ function Chat() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const listeningIdRef = useRef<number>(0);
   const isActiveRef = useRef(true);
+  const settingsRef = useRef(settings);
+  const ceoRef = useRef(ceo);
+  const textRef = useRef(text);
 
   // Reading the thread marks it read.
   useEffect(() => {
@@ -176,20 +179,39 @@ function Chat() {
     if (last && last.at > readAt) void attempt(() => api.phoneRead(last.at));
   }, [messages, readAt]);
 
+  // Update refs whenever dependencies change (for checking state at playback end)
+  useEffect(() => {
+    settingsRef.current = settings;
+    ceoRef.current = ceo;
+    textRef.current = text;
+  }, [settings, ceo, text]);
+
   // Play voice reply and trigger hands-free when new CEO message arrives
   useEffect(() => {
     const last = [...messages].reverse().find((m) => m.from === 'ceo');
     if (last && last.id !== lastCeoMessageId.current) {
       lastCeoMessageId.current = last.id;
       // Play voice reply
-      void playVoiceReply(last.text, settings.ceoVoiceProvider).then(() => {
-        // Only start hands-free if enabled and CEO is not busy and component is still mounted
-        if (settings.handsFreeModeEnabled && ceo && !isBusy(ceo) && isActiveRef.current && text === '') {
-          startHandsFreeListen();
+      void playVoiceReply(last.text, settings.ceoVoiceProvider).then((outcome) => {
+        // Re-check live conditions at the moment playback ends
+        const liveSettings = settingsRef.current;
+        const liveCeo = ceoRef.current;
+        const liveText = textRef.current;
+
+        if (outcome === 'played') {
+          // Only start hands-free if all guards still hold
+          if (liveSettings.handsFreeModeEnabled && liveCeo && !isBusy(liveCeo) && isActiveRef.current && liveText === '') {
+            startHandsFreeListen();
+          }
+        } else if (outcome === 'error' || outcome === 'unavailable') {
+          // Show problem toast
+          setHandsFreeProblem('Voice reply failed, hands-free not started');
+          setTimeout(() => setHandsFreeProblem(''), 5000);
         }
+        // For 'skipped' and 'cancelled', do nothing
       });
     }
-  }, [messages, settings.ceoVoiceProvider, settings.handsFreeModeEnabled, ceo, text]);
+  }, [messages, settings.ceoVoiceProvider]);
 
   const startHandsFreeListen = async () => {
     // Abort any previous listening session
