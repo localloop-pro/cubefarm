@@ -8,6 +8,8 @@ import { MicButton } from './MicButton';
 import { closeOverlay } from './Overlays';
 import { Games, type GameId } from './games/Games';
 import { effectiveModel } from '../../../shared/models';
+import { playVoiceReply, stopVoiceReply } from './voiceReply';
+import { setHandsFree, listenForVoice } from './handsFree';
 
 // The manager's phone: text the CEO, decide on hires, see the whole company at a glance
 // without walking anywhere, and play a game while the team works. Press P anywhere in the office.
@@ -161,23 +163,79 @@ function Chat() {
   const settings = useStore((s) => s.settings);
   const running = useStore((s) => Object.values(s.agents).filter(isBusy).length);
   const [text, setText] = useState('');
+  const [handsFreeProblem, setHandsFreeProblem] = useState('');
   const scroller = useRef<HTMLDivElement>(null);
+  const lastCeoMessageId = useRef<number | null>(null);
+  const listeningPromiseRef = useRef<Promise<any> | null>(null);
 
   // Reading the thread marks it read.
   useEffect(() => {
     const last = [...messages].reverse().find((m) => m.from === 'ceo');
     if (last && last.at > readAt) void attempt(() => api.phoneRead(last.at));
   }, [messages, readAt]);
+
+  // Play voice reply and trigger hands-free when new CEO message arrives
+  useEffect(() => {
+    const last = [...messages].reverse().find((m) => m.from === 'ceo');
+    if (last && last.id !== lastCeoMessageId.current) {
+      lastCeoMessageId.current = last.id;
+      // Play voice reply
+      void playVoiceReply(last.text, settings.ceoVoiceProvider);
+      // Trigger hands-free if enabled and CEO is not currently working
+      if (settings.handsFreeModeEnabled && ceo && !isBusy(ceo)) {
+        startHandsFreeListen();
+      }
+    }
+  }, [messages, settings.ceoVoiceProvider, settings.handsFreeModeEnabled, ceo]);
+
+  const startHandsFreeListen = async () => {
+    // First validate prerequisites
+    const problem = await setHandsFree(true, settings.ceoVoiceProvider);
+    if (!problem.ok) {
+      setHandsFreeProblem(problem.message);
+      setTimeout(() => setHandsFreeProblem(''), 5000);
+      return;
+    }
+
+    // Prerequisites OK, now start listening
+    const listenPromise = (async () => {
+      try {
+        const recognizedText = await listenForVoice();
+        // Auto-submit the recognized text
+        send(recognizedText);
+      } catch (e) {
+        const err = e instanceof Error ? e.message : String(e);
+        setHandsFreeProblem(err);
+        setTimeout(() => setHandsFreeProblem(''), 5000);
+      }
+    })();
+
+    listeningPromiseRef.current = listenPromise;
+  };
+
   useLayoutEffect(() => {
     const el = scroller.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, info.job?.kind]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopVoiceReply();
+      // Cancel any ongoing listening promise
+      if (listeningPromiseRef.current) {
+        // Promise will resolve/reject on its own when recognition ends
+        listeningPromiseRef.current = null;
+      }
+    };
+  }, []);
 
   if (!ceo) return <p className="muted phone-empty">The corner office is empty.</p>;
   const send = (t: string) => {
     const body = t.trim();
     if (!body) return;
     setText('');
+    stopVoiceReply(); // Stop any ongoing voice reply when user types
     void attempt(() => api.messageCeo(body));
   };
   const replying = ceo.status === 'working' && info.job?.kind === 'chat';
@@ -223,6 +281,7 @@ function Chat() {
           </div>
         )}
       </div>
+      {handsFreeProblem && <div className="muted small phone-hint" style={{ color: '#c33' }}>{handsFreeProblem}</div>}
       <div className="quick">
         {QUICK.map((q) => (
           <button key={q} className="quick-chip" onClick={() => send(q)}>
@@ -237,7 +296,7 @@ function Chat() {
           send(text);
         }}
       >
-        <MessageBox value={text} onChange={setText} placeholder={`Message ${ceo.name}…`} aria-label={`Message ${ceo.name}`} title="Enter sends · Shift+Enter adds a new line" autoFocus />
+        <MessageBox value={text} onChange={(v) => { setText(v); stopVoiceReply(); }} placeholder={`Message ${ceo.name}…`} aria-label={`Message ${ceo.name}`} title="Enter sends · Shift+Enter adds a new line" autoFocus />
         <MicButton value={text} onChange={setText} disabled={!ceo} />
         <button className="btn btn-small btn-good" disabled={!text.trim()}>
           Send

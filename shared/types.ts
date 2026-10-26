@@ -241,6 +241,8 @@ export interface SwarmSettings {
   autoUpdate?: boolean; // update the office itself once it's quiet (absent on servers without self-update)
   pacingSessions: number; // after Claude warns about usage, new issues start only while fewer sessions than this run
   schedulerPaused: boolean; // autonomous work held; SWARM_START_PAUSED=1 may set it at startup, only a settings update clears it
+  ceoVoiceProvider: 'off' | 'browser'; // voice synthesis for CEO replies; 'off' = silent, 'browser' = use browser's speech synthesis
+  handsFreeModeEnabled: boolean; // listen and auto-submit after each CEO reply
 }
 
 /** Claude's subscription usage: normal, pacing new work after a usage warning, or paused at the limit until `until`. */

@@ -1,6 +1,7 @@
 // Hands-free voice mode: listen after each CEO reply and auto-submit transcriptions.
 
 import { allowMic, cantListen } from './mic';
+import { micErrorLine } from './micText';
 
 /** Reason hands-free mode cannot be enabled, or '' if OK. */
 export function handsFreeProblem(ceoVoiceProvider: string): string {
@@ -15,6 +16,109 @@ export function handsFreeProblem(ceoVoiceProvider: string): string {
 
   // Other issues will be caught when allowMic() is called
   return '';
+}
+
+const LISTEN_TIMEOUT_MS = 30000; // 30 second timeout for speech recognition
+
+/** Start listening for voice input and return the recognized text, or reject on error. */
+export async function listenForVoice(): Promise<string> {
+  let stream: MediaStream | null = null;
+  let recognition: any = null;
+
+  try {
+    // Check prerequisites first (does not acquire stream)
+    const problem = handsFreeProblem('browser');
+    if (problem) {
+      throw new Error(problem);
+    }
+
+    // Request microphone access
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    // Initialize speech recognition
+    const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+    if (!SpeechRecognition) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new Error('Speech Recognition API not available');
+    }
+
+    recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+
+    return new Promise((resolve, reject) => {
+      let finalTranscript = '';
+      let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (stream) {
+          stream.getTracks().forEach((track) => track.stop());
+        }
+        if (recognition) {
+          try {
+            recognition.stop();
+          } catch {
+            // Already stopped
+          }
+        }
+      };
+
+      // Set timeout to prevent indefinite hanging
+      timeoutHandle = setTimeout(() => {
+        cleanup();
+        reject(new Error('🎧 Listening timeout. No speech detected in time.'));
+      }, LISTEN_TIMEOUT_MS);
+
+      recognition.onstart = () => {
+        // Listening started
+      };
+
+      recognition.onresult = (event: any) => {
+        let interimTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript + ' ';
+          } else {
+            interimTranscript += transcript;
+          }
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        cleanup();
+        reject(new Error(micErrorLine(event.error)));
+      };
+
+      recognition.onend = () => {
+        cleanup();
+        const text = finalTranscript.trim();
+        if (text) {
+          resolve(text);
+        } else {
+          reject(new Error('🎧 No speech detected. Try again.'));
+        }
+      };
+
+      recognition.start();
+    });
+  } catch (e) {
+    // Ensure cleanup on any error
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+    }
+    if (recognition) {
+      try {
+        recognition.stop();
+      } catch {
+        // Already stopped
+      }
+    }
+    const err = e instanceof Error ? e.message : String(e);
+    throw new Error(err.includes('🎙️') || err.includes('🎧') ? err : micErrorLine(err));
+  }
 }
 
 /** Enable or disable hands-free mode after checking prerequisites. */

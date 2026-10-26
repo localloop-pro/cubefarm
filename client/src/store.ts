@@ -142,6 +142,8 @@ export const useStore = create<State>((set, get) => ({
     tutorialStep: -1,
     pacingSessions: 3,
     schedulerPaused: false,
+    ceoVoiceProvider: 'off',
+    handsFreeModeEnabled: false,
   },
   clis: [],
   repos: [],

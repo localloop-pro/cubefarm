@@ -48,7 +48,10 @@ export async function allowMic(): Promise<string> {
     if (!navigator.mediaDevices?.getUserMedia) {
       return cantListen() || '🎙️ The microphone API is not available.';
     }
-    await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Just check permission without holding the stream
+    // (listenForVoice will acquire the stream when actually recording)
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach((track) => track.stop());
     return '';
   } catch (e) {
     const err = e instanceof Error ? e.message : String(e);

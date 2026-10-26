@@ -393,6 +393,8 @@ export class Swarm {
       autoUpdate: true,
       pacingSessions: DEFAULT_PACING_SESSIONS,
       schedulerPaused: false,
+      ceoVoiceProvider: 'off',
+      handsFreeModeEnabled: false,
     },
     repos: [],
     agents: [],
