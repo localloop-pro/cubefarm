@@ -10,6 +10,7 @@ The Featured spec, approved plan, `Featured_todo.md`, and `Featured_done.db` are
 - Completed: execute the disposable interruption matrix, reproduce failures, apply narrow recovery fixes, and rerun regression.
 - Completed: disposable Playwright demo review of restored task, QA status and owner gates; retain screenshots below.
 - Completed: QA round 1 terminal-fix follow-up, including hidden/visible CLOSED/MERGED regressions and preservation of the QA record in checkpoint logs.
+- Completed: reused-branch review follow-up; ambiguous terminal issue PRs retain ownership for manual inspection, and exact saved PR identity takes precedence.
 - Pending: independent teammate QA re-test of PR #60 and manager disposition. No merge or deployment is authorized here.
 - Unverified operational exercises are listed under Boundaries; they are not local test passes or newly approved work.
 
@@ -75,7 +76,7 @@ Enter and press E at the board. #3 remains stopped/in progress; PR #7 says “ne
 | Assignment checkpoint while desk prepare awaits | Task/branch/owner survive as stopped; no session ID means no replay/reset/reassignment. |
 | Interrupted QA after checkpoint | Requeued while paused, fresh head read on resume, old run never accepted; one new QA session on repeated scheduling. |
 | Fake PR succeeds before local acknowledgement | Startup fetch discovers it and queues QA; issue writer does not resume/create another PR. |
-| Fake PR is CLOSED or MERGED before acknowledgement | Remote state is reconciled, task clears without another writer or merge; closure is not claimed as a merge. |
+| Fake PR is CLOSED or MERGED before acknowledgement | Remote state is reconciled without another writer or merge. A saved PR identity allows task cleanup; a branch-only terminal match is ambiguous across attempts and holds the issue for inspection. Closure is not claimed as a merge. |
 | Terminal fix PR, hidden from or visible on the board | CLOSED/MERGED clears the task and active QA record without writer replay; complete QA evidence and explicit outcome survive in the developer checkpoint log and another restart; dirty file unchanged. |
 | Fake PR outside bounded board window | Targeted branch lookup and PR details precede recovery; no writer replay. |
 | Board read or targeted read unavailable | Task remains stopped and owned; no writer starts and no completion is inferred. |
@@ -96,7 +97,7 @@ These are instructions for an authorized recovery operator, not commands execute
 
 1. Keep scheduling paused during inspection. Preserve the office state file, any `.tmp` checkpoint, desk/worktree (including untracked files), terminal captures, logs, screenshots, and QA comment/evidence URLs. Save their timestamps and the running code SHA. Do not reset, clean, remove a desk, or automatically promote a temp file.
 2. Check whether a keeper still owns a CLI. A reconnecting session is already a writer; do not start another. This suite reuses keeper tests and does not certify provider handoff.
-3. Read GitHub before retrying anything uncertain: issue open/closed state, exact branch PR across all states, PR head SHA, merged/closed state, checks, existing QA comments and uploaded evidence. Board absence alone is not evidence of failure. If remote reads fail, keep the task held. Do not replay create-issue, PR, comment/upload, branch-update or merge operations merely because acknowledgement was lost.
+3. Read GitHub before retrying anything uncertain: issue open/closed state, exact branch PR across all states, PR head SHA, merged/closed state, checks, existing QA comments and uploaded evidence. Board absence alone is not evidence of failure. Branches can be reused on reassignment; a historical terminal PR without a saved PR identity cannot establish the outcome of the current attempt. Keep ambiguous work stopped and owned for manual inspection. If remote reads fail, keep the task held. Do not replay create-issue, PR, comment/upload, branch-update or merge operations merely because acknowledgement was lost.
 4. For an existing open PR, continue QA on its current head rather than opening a replacement. A saved QA pass covers only its `passedSha`; a changed head requires a new QA run. For a remotely merged PR, reconcile the completed remote outcome; for a closed PR, decide whether further work is wanted rather than labelling it merged.
 5. A stopped issue/fix with a saved session can be resumed explicitly through its existing desk after inspection. A task held for missing session/branch needs manual worktree review: preserve changes first, then deliberately clear/reassign with the manager's controls if appropriate. Do not bypass pending hire approvals, needs-human QA, auto-merge settings or capacity limits. Pause blocks autonomous recovery; removing pause does not automatically replay held stopped sessions.
 6. Record the remote IDs, tested/current SHA, operator decision and preserved evidence. Resume only after a single owner/writer is established. Unsupported outcomes stay unresolved; no “done” entry merely because a process restarted.

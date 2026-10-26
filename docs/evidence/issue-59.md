@@ -1,6 +1,21 @@
 # Issue #59 local validation record
 
-## QA round 1 follow-up (current)
+## Reused-branch review follow-up (current)
+
+Implementation/test SHA: **4f77b36eb63ec6a8d98d4b8a54cf3aaec09d4dcc**. The subsequent documentation commit changes no implementation/tests.
+
+A further inline review identified historical terminal PRs on reused issue branches. Recovery now holds an issue with no saved PR identity when its branch matches a CLOSED/MERGED PR: the session, ownership and task remain available for inspection, and no completion or writer replay is inferred. Exact saved PR numbers take precedence over historical PRs sharing the branch.
+
+Four cases cover CLOSED/MERGED historical issue PRs both inside/outside the board. Another regression proves an active saved fix PR is selected ahead of a different closed PR sharing its branch. The terminal-fix regressions from the QA follow-up remain passing.
+
+- Recovery matrix: **29 passed**. Focused safety/recovery: **141 passed**, 7 files. Full suite: **438 passed**, 1 existing todo, 36 files.
+- Typecheck, build and whitespace checks pass; existing large-chunk warning remains.
+- [Latest timing artifact](issue-59-review-timings.txt) identifies the tested SHA and per-scenario observations.
+- Disposable demo smoke on frontend 5231/backend 15231 rechecked the manager settings view; zero console errors and three existing dependency warnings. [Screenshot](issue-59-review-settings.png). Demo stopped. Real recovery behavior is established by on-disk tests; no production interaction occurred.
+- Automated review could not re-run because the review service reported its usage limit. Independent QA re-test remains pending; no CI green or merge is claimed.
+
+
+## QA round 1 follow-up (previous validation)
 
 Implementation/test SHA: **e993ffecb82a8991c74f67654d2b7fc1036da5cd**. Documentation/evidence follows in a separate commit. Fork `origin/main` was fetched and merged; it was already included.
 
