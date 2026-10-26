@@ -32,6 +32,16 @@ const THEME: ITheme = {
   brightWhite: '#ffffff',
 };
 
+let cachedSessionToken: string | null = null;
+
+async function getSessionToken(): Promise<string> {
+  if (cachedSessionToken) return cachedSessionToken;
+  const res = await fetch('/api/session');
+  const data = (await res.json()) as { token: string };
+  cachedSessionToken = data.token;
+  return cachedSessionToken;
+}
+
 export function LiveTerminal({ agentId, className }: { agentId: string; className?: string }) {
   const host = useRef<HTMLDivElement>(null);
   const [live, setLive] = useState(false);
@@ -71,9 +81,10 @@ export function LiveTerminal({ agentId, className }: { agentId: string; classNam
       }
       if (ready) send({ t: 'resize', cols: term.cols, rows: term.rows });
     };
-    const connect = () => {
+    const connect = async () => {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const socket = new WebSocket(`${proto}://${location.host}/ws/term?agent=${encodeURIComponent(agentId)}`);
+      const token = await getSessionToken();
+      const socket = new WebSocket(`${proto}://${location.host}/ws/term?agent=${encodeURIComponent(agentId)}&token=${encodeURIComponent(token)}`);
       ws = socket;
       socket.onopen = () => setConnected(true);
       socket.onmessage = (e) => {

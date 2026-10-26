@@ -1,6 +1,7 @@
 import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import type { AddressInfo } from 'node:net';
 import { WebSocketServer } from 'ws';
@@ -15,6 +16,9 @@ const swarm = new Swarm(DEMO ? createDemoBackend() : realBackend);
 // Sessions the office picks back up while it starts need the address their CLIs call back on before it listens.
 if (PORT) setOfficeUrl(`http://127.0.0.1:${PORT}`);
 await swarm.init();
+
+// Per-run random session token for CSRF protection and API authentication
+const SESSION_TOKEN = crypto.randomBytes(32).toString('hex');
 
 const app = express();
 // Agent CLIs calling back: hooks (a tool result can be a large screenshot, hence the limit) and the CEO's office tools.
@@ -41,6 +45,38 @@ const num = (v: unknown) => {
 const str = (v: unknown) => (typeof v === 'string' ? v : '');
 // Repo ids contain a slash ("owner/name"), so they travel URL-encoded as a single segment.
 const repoId = (req: Request) => decodeURIComponent(String(req.params.repo));
+
+// Validate session token (header or body). For requests without a token/body parsed yet, this runs after express.json.
+const requireSessionToken = (req: Request, _res: Response, next: NextFunction) => {
+  const token = req.headers['x-session-token'];
+  if (token === SESSION_TOKEN) return next();
+  throw new HttpError(401, 'Missing or invalid session token');
+};
+
+// Validate Host and Origin headers to defeat DNS rebinding.
+const validateOrigin = (req: Request, _res: Response, next: NextFunction) => {
+  const host = req.headers.host;
+  const origin = req.headers.origin;
+  // Accept either localhost or 127.0.0.1 with the correct port
+  const allowedHosts = [`localhost:${PORT}`, `127.0.0.1:${PORT}`];
+  if (host && !allowedHosts.includes(host)) throw new HttpError(403, 'Invalid Host header');
+  if (origin) {
+    const allowedOrigins = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`];
+    if (!allowedOrigins.includes(origin)) throw new HttpError(403, 'Invalid Origin');
+  }
+  next();
+};
+
+// Session token endpoint: available to same-origin requests without auth to bootstrap
+app.get('/api/session', (_req, res) => res.json({ token: SESSION_TOKEN }));
+
+// Apply authentication and origin checks to all other /api routes (except /api/hooks and /api/mcp, which use their own token paths)
+app.use('/api', validateOrigin);
+app.use('/api', (req, res, next) => {
+  // /api/session and /api/hooks/:token and /api/mcp/:token skip auth; everything else requires the session token
+  if (req.path === '/session' || req.path.startsWith('/hooks/') || req.path.startsWith('/mcp/')) return next();
+  requireSessionToken(req, res, next);
+});
 
 app.get('/api/state', route(() => swarm.snapshot()));
 
@@ -180,10 +216,29 @@ const wss = new WebSocketServer({ noServer: true });
 const terms = new WebSocketServer({ noServer: true });
 wss.on('connection', (ws) => swarm.addClient(ws));
 terms.on('connection', (ws, req) => swarm.attachTerminal(new URL(req.url ?? '', 'http://localhost').searchParams.get('agent') ?? '', ws));
+
+// Validate Origin and Host headers on WebSocket upgrade, and verify session token in query or first message.
+const validateWebSocketUpgrade = (req: http.IncomingMessage): boolean => {
+  const host = req.headers.host;
+  const origin = req.headers.origin;
+  const allowedHosts = [`localhost:${PORT}`, `127.0.0.1:${PORT}`];
+  if (!host || !allowedHosts.includes(host)) return false;
+  if (origin) {
+    const allowedOrigins = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`];
+    if (!allowedOrigins.includes(origin)) return false;
+  }
+  // Extract session token from query parameter
+  const url = new URL(req.url ?? '', 'http://localhost');
+  const token = url.searchParams.get('token');
+  if (token !== SESSION_TOKEN) return false;
+  return true;
+};
+
 server.on('upgrade', (req, socket, head) => {
   const { pathname } = new URL(req.url ?? '', 'http://localhost');
   const target = pathname === '/ws' ? wss : pathname === '/ws/term' ? terms : null;
   if (!target) return void socket.destroy();
+  if (!validateWebSocketUpgrade(req)) return void socket.destroy();
   target.handleUpgrade(req, socket, head, (ws) => target.emit('connection', ws, req));
 });
 
