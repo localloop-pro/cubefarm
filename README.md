@@ -92,3 +92,5 @@ Running it from a clone of this repo (`npm start`)? Then the office updates itse
 ## License
 
 [MIT](LICENSE)
+
+- [Crash recovery verification and runbook](docs/crash-recovery.md): disposable interruption tests, recovery boundaries and manual reconciliation.
