@@ -166,6 +166,7 @@ function Chat() {
   const [handsFreeProblem, setHandsFreeProblem] = useState('');
   const scroller = useRef<HTMLDivElement>(null);
   const lastCeoMessageId = useRef<number | null>(null);
+  const listeningPromiseRef = useRef<Promise<any> | null>(null);
 
   // Reading the thread marks it read.
   useEffect(() => {
@@ -197,15 +198,19 @@ function Chat() {
     }
 
     // Prerequisites OK, now start listening
-    try {
-      const recognizedText = await listenForVoice();
-      // Auto-submit the recognized text
-      send(recognizedText);
-    } catch (e) {
-      const err = e instanceof Error ? e.message : String(e);
-      setHandsFreeProblem(err);
-      setTimeout(() => setHandsFreeProblem(''), 5000);
-    }
+    const listenPromise = (async () => {
+      try {
+        const recognizedText = await listenForVoice();
+        // Auto-submit the recognized text
+        send(recognizedText);
+      } catch (e) {
+        const err = e instanceof Error ? e.message : String(e);
+        setHandsFreeProblem(err);
+        setTimeout(() => setHandsFreeProblem(''), 5000);
+      }
+    })();
+
+    listeningPromiseRef.current = listenPromise;
   };
 
   useLayoutEffect(() => {
@@ -217,6 +222,11 @@ function Chat() {
   useEffect(() => {
     return () => {
       stopVoiceReply();
+      // Cancel any ongoing listening promise
+      if (listeningPromiseRef.current) {
+        // Promise will resolve/reject on its own when recognition ends
+        listeningPromiseRef.current = null;
+      }
     };
   }, []);
 

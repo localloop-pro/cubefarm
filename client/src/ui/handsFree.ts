@@ -18,11 +18,22 @@ export function handsFreeProblem(ceoVoiceProvider: string): string {
   return '';
 }
 
+const LISTEN_TIMEOUT_MS = 30000; // 30 second timeout for speech recognition
+
 /** Start listening for voice input and return the recognized text, or reject on error. */
 export async function listenForVoice(): Promise<string> {
+  let stream: MediaStream | null = null;
+  let recognition: any = null;
+
   try {
+    // Check prerequisites first (does not acquire stream)
+    const problem = handsFreeProblem('browser');
+    if (problem) {
+      throw new Error(problem);
+    }
+
     // Request microphone access
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
     // Initialize speech recognition
     const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
@@ -31,13 +42,34 @@ export async function listenForVoice(): Promise<string> {
       throw new Error('Speech Recognition API not available');
     }
 
-    const recognition = new SpeechRecognition();
+    recognition = new SpeechRecognition();
     recognition.continuous = false;
     recognition.interimResults = true;
     recognition.lang = 'en-US';
 
     return new Promise((resolve, reject) => {
       let finalTranscript = '';
+      let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (stream) {
+          stream.getTracks().forEach((track) => track.stop());
+        }
+        if (recognition) {
+          try {
+            recognition.stop();
+          } catch {
+            // Already stopped
+          }
+        }
+      };
+
+      // Set timeout to prevent indefinite hanging
+      timeoutHandle = setTimeout(() => {
+        cleanup();
+        reject(new Error('🎧 Listening timeout. No speech detected in time.'));
+      }, LISTEN_TIMEOUT_MS);
 
       recognition.onstart = () => {
         // Listening started
@@ -56,12 +88,12 @@ export async function listenForVoice(): Promise<string> {
       };
 
       recognition.onerror = (event: any) => {
-        stream.getTracks().forEach((track) => track.stop());
+        cleanup();
         reject(new Error(micErrorLine(event.error)));
       };
 
       recognition.onend = () => {
-        stream.getTracks().forEach((track) => track.stop());
+        cleanup();
         const text = finalTranscript.trim();
         if (text) {
           resolve(text);
@@ -73,8 +105,19 @@ export async function listenForVoice(): Promise<string> {
       recognition.start();
     });
   } catch (e) {
+    // Ensure cleanup on any error
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+    }
+    if (recognition) {
+      try {
+        recognition.stop();
+      } catch {
+        // Already stopped
+      }
+    }
     const err = e instanceof Error ? e.message : String(e);
-    throw new Error(micErrorLine(err));
+    throw new Error(err.includes('🎙️') || err.includes('🎧') ? err : micErrorLine(err));
   }
 }
 
