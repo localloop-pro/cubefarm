@@ -9,7 +9,7 @@ import { closeOverlay } from './Overlays';
 import { Games, type GameId } from './games/Games';
 import { effectiveModel } from '../../../shared/models';
 import { playVoiceReply, stopVoiceReply } from './voiceReply';
-import { setHandsFree } from './handsFree';
+import { setHandsFree, listenForVoice } from './handsFree';
 
 // The manager's phone: text the CEO, decide on hires, see the whole company at a glance
 // without walking anywhere, and play a game while the team works. Press P anywhere in the office.
@@ -188,9 +188,22 @@ function Chat() {
   }, [messages, settings.ceoVoiceProvider, settings.handsFreeModeEnabled, ceo]);
 
   const startHandsFreeListen = async () => {
+    // First validate prerequisites
     const problem = await setHandsFree(true, settings.ceoVoiceProvider);
     if (!problem.ok) {
       setHandsFreeProblem(problem.message);
+      setTimeout(() => setHandsFreeProblem(''), 5000);
+      return;
+    }
+
+    // Prerequisites OK, now start listening
+    try {
+      const recognizedText = await listenForVoice();
+      // Auto-submit the recognized text
+      send(recognizedText);
+    } catch (e) {
+      const err = e instanceof Error ? e.message : String(e);
+      setHandsFreeProblem(err);
       setTimeout(() => setHandsFreeProblem(''), 5000);
     }
   };

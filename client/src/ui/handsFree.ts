@@ -1,6 +1,7 @@
 // Hands-free voice mode: listen after each CEO reply and auto-submit transcriptions.
 
 import { allowMic, cantListen } from './mic';
+import { micErrorLine } from './micText';
 
 /** Reason hands-free mode cannot be enabled, or '' if OK. */
 export function handsFreeProblem(ceoVoiceProvider: string): string {
@@ -15,6 +16,66 @@ export function handsFreeProblem(ceoVoiceProvider: string): string {
 
   // Other issues will be caught when allowMic() is called
   return '';
+}
+
+/** Start listening for voice input and return the recognized text, or reject on error. */
+export async function listenForVoice(): Promise<string> {
+  try {
+    // Request microphone access
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    // Initialize speech recognition
+    const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+    if (!SpeechRecognition) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new Error('Speech Recognition API not available');
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+
+    return new Promise((resolve, reject) => {
+      let finalTranscript = '';
+
+      recognition.onstart = () => {
+        // Listening started
+      };
+
+      recognition.onresult = (event: any) => {
+        let interimTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript + ' ';
+          } else {
+            interimTranscript += transcript;
+          }
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        stream.getTracks().forEach((track) => track.stop());
+        reject(new Error(micErrorLine(event.error)));
+      };
+
+      recognition.onend = () => {
+        stream.getTracks().forEach((track) => track.stop());
+        const text = finalTranscript.trim();
+        if (text) {
+          resolve(text);
+        } else {
+          reject(new Error('🎧 No speech detected. Try again.'));
+        }
+      };
+
+      recognition.start();
+    });
+  } catch (e) {
+    const err = e instanceof Error ? e.message : String(e);
+    throw new Error(micErrorLine(err));
+  }
 }
 
 /** Enable or disable hands-free mode after checking prerequisites. */
