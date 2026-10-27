@@ -251,6 +251,53 @@ async function removeDir(dir: string) {
   await fs.rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 250 });
 }
 
+/** Check if a worktree has uncommitted changes or unpushed commits. */
+export async function deskIsDirty(wt: string): Promise<boolean> {
+  try {
+    // Check for uncommitted changes or untracked files (excluding ignored files)
+    const status = await git(['status', '--porcelain', '--untracked-files=no'], { cwd: wt });
+    if (status) return true;
+    // Check for unpushed commits: compare current branch with its upstream
+    // git log @{u}.. lists commits not on upstream; git rev-list origin/<branch>..HEAD for explicit check
+    try {
+      const branch = await git(['symbolic-ref', '--short', '-q', 'HEAD'], { cwd: wt });
+      const upstreamRef = `origin/${branch}`;
+      // Check if the upstream exists
+      await git(['rev-parse', '--verify', upstreamRef], { cwd: wt });
+      // Count commits ahead of upstream
+      const ahead = await git(['rev-list', '--count', `${upstreamRef}..HEAD`], { cwd: wt });
+      if (ahead && Number(ahead) > 0) return true;
+    } catch {
+      // No upstream or branch info; treat as not dirty if status was clean
+    }
+    return false;
+  } catch (err) {
+    // If we can't determine status, assume it's not dirty to avoid false positives
+    return false;
+  }
+}
+
+/** Create a recovery ref and stash for dirty desk work, returning the ref name if created. */
+async function preserveDeskWork(main: string, wt: string, agentSlug: string): Promise<string | null> {
+  if (!(await deskIsDirty(wt))) return null;
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5); // e.g. "2025-10-27T14-30-45"
+  const refName = `office/recovered/${agentSlug}/${timestamp}`;
+
+  try {
+    // Stage all changes and create a commit
+    await git(['add', '-A'], { cwd: wt });
+    await git(['commit', '-m', `office: recovered desk state ${agentSlug} ${timestamp}`], { cwd: wt });
+    // Create a recovery ref pointing to this commit
+    const commitSha = await git(['rev-parse', 'HEAD'], { cwd: wt });
+    await git(['update-ref', `refs/${refName}`, commitSha], { cwd: main });
+    return refName;
+  } catch (err) {
+    console.warn(`Failed to preserve desk work for ${agentSlug}:`, (err as Error).message);
+    return null;
+  }
+}
+
 export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string, branch: string): Promise<string> {
   return withRepoLock(fullName, async () => {
     const main = mainDir(fullName);
@@ -278,6 +325,12 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
     // node_modules warm between tasks.
     if (await exists(path.join(wt, '.git'))) {
       try {
+        // Preserve any uncommitted changes or unpushed commits before reusing the desk
+        const recoveryRef = await preserveDeskWork(main, wt, agentSlug);
+        if (recoveryRef) {
+          console.log(`Preserved desk work for ${agentSlug}: ${recoveryRef}`);
+        }
+
         await git(['checkout', '--force', '-B', branch, ref], { cwd: wt });
         await git(['reset', '--hard', ref], { cwd: wt });
         // Untracked leftovers from the last task go; ignored files (node_modules, build caches) stay.
@@ -310,6 +363,15 @@ export function removeDesk(fullName: string, agentSlug: string): Promise<void> {
     const main = mainDir(fullName);
     const wt = deskDir(fullName, agentSlug);
     if (!(await exists(wt))) return;
+
+    // Preserve any uncommitted changes or unpushed commits before removing the desk
+    if (await exists(path.join(wt, '.git'))) {
+      const recoveryRef = await preserveDeskWork(main, wt, agentSlug);
+      if (recoveryRef) {
+        console.log(`Preserved desk work for ${agentSlug}: ${recoveryRef}`);
+      }
+    }
+
     await git(['worktree', 'remove', '--force', wt], { cwd: main }).catch(() => undefined);
     await removeDir(wt).catch(() => undefined);
     await git(['worktree', 'prune'], { cwd: main }).catch(() => undefined);
