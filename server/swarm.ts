@@ -8,6 +8,7 @@ import type { PrDetails } from './github.ts';
 import { defaultProjectsDir, HOME_DIR, LOG_BUFFER, SCHEDULER_INTERVAL_MS, STATE_FILE, SYNC_INTERVAL_MS, WORKSPACE_ROOT } from './config.ts';
 import { ceoJobPrompt, ceoSystemPrompt, createOfficeTools, IssueCap, jobLabel, planRoute, specialtyLabel, specialtySlug, type CeoJob, type OfficeTools } from './ceo.ts';
 import { HttpError } from './httpError.ts';
+import { validateIssueIdempotencyKey } from './issueIdempotency.ts';
 import { CHECKS_ALERT_MS, MAX_MERGE_FIXES, MERGE_RETRY_MS, mergeStep, type MergeRecord, type MergeStep } from './mergeGate.ts';
 import { DEFAULT_PREVIEW, Previews, parsePreviewPatch } from './previews.ts';
 import { drainDecision, lastUpdateMessage, POSTPONE_MS, type DrainInput, type LastUpdate } from './officeUpdate.ts';
@@ -1391,7 +1392,7 @@ export class Swarm {
     const repo = this.repo(repoId);
     if (!title.trim()) throw new HttpError(400, 'An issue needs a title');
     const slug = specialtySlug(specialty);
-    const key = idempotencyKey?.trim() || crypto.randomUUID();
+    const key = validateIssueIdempotencyKey(idempotencyKey?.trim() || crypto.randomUUID());
     const number = await this.fileIssueOperation(key, repo.fullName, title.trim(), body, slug ? [specialtyLabel(slug)] : [], assignTo);
     await this.syncRepo(repo.id);
     this.toast('success', `Issue #${number} filed on ${repo.fullName}`);
@@ -1413,7 +1414,6 @@ export class Swarm {
   }
 
   private async performIssueOperation(key: string, fullName: string, title: string, body: string, labels: string[], assignTo?: string) {
-    if (!/^[\w-]{8,128}$/.test(key)) throw new HttpError(400, 'Invalid idempotency key');
     const normalized = JSON.stringify({ title: title.trim(), body: body.trim(), labels: [...labels].sort(), assignTo: assignTo ?? null });
     const fingerprint = crypto.createHash('sha256').update(normalized).digest('hex');
     let op = this.state.issueOperations.find((x) => x.key === key);

@@ -10,6 +10,7 @@ import { realBackend } from './backend.ts';
 import { handleHook, handleMcp, setOfficeUrl } from './cliRunner.ts';
 import { createDemoBackend } from './demo.ts';
 import { underLauncher } from './officeUpdate.ts';
+import { createIssueFromApi } from './issueRoute.ts';
 import { HttpError, Swarm } from './swarm.ts';
 
 const swarm = new Swarm(DEMO ? createDemoBackend() : realBackend);
@@ -131,16 +132,7 @@ app.post('/api/repos/:repo/sync', route((req) => swarm.syncRepo(repoId(req))));
 app.post('/api/repos/:repo/sync-folder', route((req) => swarm.syncFolderNow(repoId(req))));
 app.post(
   '/api/repos/:repo/issues',
-  route(async (req) => ({
-    number: await swarm.createIssue(
-      repoId(req),
-      str(req.body.title),
-      str(req.body.body),
-      str(req.body.assignTo) || undefined,
-      str(req.body.specialty) || undefined,
-      str(req.body.idempotencyKey) || undefined,
-    ),
-  })),
+  route(async (req) => ({ number: await createIssueFromApi(swarm, repoId(req), req.body) })),
 );
 app.post('/api/repos/:repo/plan', route((req) => swarm.planFloor(repoId(req), typeof req.body?.mission === 'string' ? req.body.mission : undefined)));
 app.post('/api/repos/:repo/onboard', route((req) => swarm.onboardFloor(repoId(req))));
