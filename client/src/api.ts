@@ -69,8 +69,8 @@ export const api = {
   disconnectRepo: (repoId: string) => call('DELETE', r(repoId)),
   syncRepo: (repoId: string) => call('POST', `${r(repoId)}/sync`),
   syncFolder: (repoId: string) => call<{ folderSync: string | null }>('POST', `${r(repoId)}/sync-folder`),
-  createIssue: (repoId: string, title: string, body: string, assignTo?: string, specialty?: string) =>
-    call<{ number: number }>('POST', `${r(repoId)}/issues`, { title, body, assignTo, specialty }),
+  createIssue: (repoId: string, title: string, body: string, assignTo: string | undefined, specialty: string | undefined, idempotencyKey: string) =>
+    call<{ number: number }>('POST', `${r(repoId)}/issues`, { title, body, assignTo, specialty, idempotencyKey }),
   planFloor: (repoId: string, mission?: string) => call('POST', `${r(repoId)}/plan`, { mission }),
   onboardFloor: (repoId: string) => call('POST', `${r(repoId)}/onboard`),
   mergePull: (repoId: string, n: number, method: 'squash' | 'merge' | 'rebase' = 'squash') => call('POST', `${r(repoId)}/pulls/${n}/merge`, { method }),

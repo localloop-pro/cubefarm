@@ -81,6 +81,9 @@ beforeEach(async () => {
     mainDir: () => path.join(location.root, 'main'), deskDir: () => path.join(location.root, 'dirty-desk'),
     prepareDesk: vi.fn(async () => path.join(location.root, 'dirty-desk')),
     listIssues: async () => [issue],
+    findIssueByMarker: vi.fn(async (_repo: string, marker: string) => remote.issues.find((i: Any) => i.body.includes(marker))?.number ?? null),
+    createIssue: vi.fn(async (_repo: string, _title: string, body: string) => { remote.events.push('create-issue'); const n = 40 + remote.issueWrites++; remote.issues.push({ number: n, body }); return n; }),
+    readIssueOperations: () => remote.issues,
     listPulls: vi.fn(async () => { remote.events.push('read-pulls'); if (remote.unavailable) throw new Error('fake offline'); return structuredClone(remote.hideFromBoard ? [] : remote.pulls); }),
     prDetails: vi.fn(async () => { remote.events.push('read-details'); if (remote.unavailable) throw new Error('fake offline'); return structuredClone(remote.pulls[0]); }),
     prForBranch: vi.fn(async () => { remote.events.push('read-branch'); if (remote.branchUnavailable) throw new Error('fake branch read offline'); return remote.pulls[0] ?? null; }),
@@ -91,7 +94,59 @@ beforeEach(async () => {
     previews: { hasDefault: async () => false },
     office: { head: async () => null, takeLastUpdate: async () => null, isOwnFolder: () => false, launcher: false },
   };
+  remote.issues = []; remote.issueWrites = 0;
+  calls.findIssueByMarker = vi.fn(async (_repo: string, marker: string) => { if (remote.trackIssueReads) remote.events.push('read-issues'); if (remote.issueReadsUnavailable) throw new Error('fake issue read offline'); return remote.issues.find((i: Any) => i.body.includes(marker))?.number ?? null; });
   backend = new Proxy(calls, { get: (obj, key) => { if (key in obj) return obj[key]; throw new Error(`Unexpected backend access: ${String(key)}`); } }) as Backend;
+});
+
+describe('durable issue filing idempotency', () => {
+  const key = 'manager-retry-key-0001';
+  async function ready() { const x = await seed(); return x.s; }
+  it('retries after interruption before write and writes once', async () => {
+    const s = await ready();
+    calls.createIssue.mockRejectedValueOnce(new Error('interrupted before write'));
+    await expect(s.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).rejects.toThrow('interrupted before write');
+    await expect(s.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).resolves.toBe(40);
+    expect(remote.issueWrites).toBe(1);
+  });
+  it('recovers creation after remote write before local acknowledgement', async () => {
+    const s = await ready();
+    calls.createIssue.mockImplementationOnce(async (_r: string, _t: string, body: string) => { remote.issues.push({ number: 41, body }); throw new Error('ack lost'); });
+    await expect(s.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).rejects.toThrow('ack lost');
+    remote.trackIssueReads = true;
+    const restarted = await restart('issue:after-write');
+    await expect(restarted.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).resolves.toBe(41);
+    expect(remote.issueWrites).toBe(0);
+    expect(remote.events).toContain('read-issues');
+  });
+  it('returns the recorded result for a duplicate key and rejects payload mismatch', async () => {
+    const s = await ready();
+    await expect(s.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).resolves.toBe(40);
+    await expect(s.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).resolves.toBe(40);
+    await expect(s.createIssue(repoId, 'Other task', 'Body', undefined, undefined, key)).rejects.toThrow('different issue request');
+    expect(remote.issueWrites).toBe(1);
+  });
+  it('rejects an assignee mismatch before a second assignment or GitHub write', async () => {
+    const s = await ready();
+    const assign = vi.spyOn(s, 'assign').mockResolvedValue(undefined as never);
+    await expect(s.createIssue(repoId, 'New task', 'Body', 'agent-A', undefined, key)).resolves.toBe(40);
+    await expect(s.createIssue(repoId, 'New task', 'Body', 'agent-B', undefined, key)).rejects.toThrow('different issue request');
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(assign).toHaveBeenCalledWith('agent-A', 40);
+    expect(remote.issueWrites).toBe(1);
+  });
+  it('keeps an uncertain operation unresolved when remote reads are unavailable', async () => {
+    const s = await ready();
+    calls.createIssue.mockRejectedValueOnce(new Error('unknown write outcome'));
+    await expect(s.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).rejects.toThrow('unknown write outcome');
+    remote.trackIssueReads = true;
+    remote.issueReadsUnavailable = true;
+    const restarted = await restart('issue:remote-read-outage');
+    await expect(restarted.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).rejects.toThrow('unresolved');
+    expect(remote.issueWrites).toBe(0);
+    expect(restarted.state.issueOperations[0]).toMatchObject({ status: 'unresolved', number: null });
+    gates(restarted);
+  });
 });
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
 afterAll(async () => {

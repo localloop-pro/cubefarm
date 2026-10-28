@@ -20,6 +20,7 @@ export function IssueForm({ repoId, agents, onDone }: { repoId: string; agents: 
   const [body, setBody] = useState('');
   const [assignTo, setAssignTo] = useState('');
   const [busy, setBusy] = useState(false);
+  const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
   const free = agents.filter((a) => a.role === 'dev' && a.status !== 'working' && a.status !== 'preparing');
   return (
     <form
@@ -29,10 +30,11 @@ export function IssueForm({ repoId, agents, onDone }: { repoId: string; agents: 
         if (!title.trim()) return;
         setBusy(true);
         try {
-          await api.createIssue(repoId, title, body, assignTo || undefined);
+          await api.createIssue(repoId, title, body, assignTo || undefined, undefined, idempotencyKey);
           setTitle('');
           setBody('');
           setAssignTo('');
+          setIdempotencyKey(crypto.randomUUID());
           onDone?.();
         } catch {
           // toasted

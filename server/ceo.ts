@@ -32,7 +32,7 @@ export interface OfficeHandlers {
     effort?: string;
   }): string;
   proposeLetGo(a: { agent_id: string; reason: string }): string;
-  fileIssue(a: { floor: number; title: string; body: string; specialty?: string }): Promise<string>;
+  fileIssue(a: { floor: number; title: string; body: string; specialty?: string; idempotency_key: string }): Promise<string>;
   routeIssue(a: { floor: number; number: number; specialty?: string; depends_on?: number[] }): Promise<string>;
 }
 
@@ -130,6 +130,7 @@ export function createOfficeTools(h: OfficeHandlers): OfficeTools {
         title: z.string().max(120),
         body: z.string().max(6000).describe('Context, what to build, acceptance criteria'),
         specialty: z.string().max(24).optional(),
+        idempotency_key: z.string().min(8).max(128).describe('Stable key for retrying this exact issue request'),
       },
       (a) => run(() => h.fileIssue(a)),
     ),

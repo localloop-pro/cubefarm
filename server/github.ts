@@ -47,6 +47,14 @@ export async function listIssues(fullName: string): Promise<IssueInfo[]> {
     .sort((a, b) => a.number - b.number);
 }
 
+/** Search all issue states for the exact durable marker; never infer absence from the bounded board listing. */
+export async function findIssueByMarker(fullName: string, marker: string): Promise<number | null> {
+  const rows = await ghJson<{ number: number; body: string }[]>([
+    'issue', 'list', '-R', fullName, '--state', 'all', '--search', marker, '--limit', '100', '--json', 'number,body',
+  ]);
+  return rows.find((issue) => (issue.body ?? '').includes(marker))?.number ?? null;
+}
+
 interface RawPull {
   number: number;
   title: string;
