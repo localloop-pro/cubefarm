@@ -143,7 +143,15 @@ interface Persisted {
   issueOperations: IssueOperation[];
 }
 
-interface IssueOperation { key: string; repo: string; fingerprint: string; marker: string; status: 'pending' | 'unresolved' | 'complete'; number: number | null }
+interface IssueOperation {
+  key: string;
+  repo: string;
+  fingerprint: string;
+  marker: string;
+  // The pre-hardening implementation wrote `pending` while a GitHub write could already be in flight. Never replay it.
+  status: 'ready' | 'attempting' | 'pending' | 'unresolved' | 'complete';
+  number: number | null;
+}
 
 interface Shot {
   data: Buffer;
@@ -432,7 +440,8 @@ export class Swarm {
   private user: string | null = null;
   private ghError: string | undefined;
   private saveTimer: NodeJS.Timeout | null = null;
-  private issueOperationQueue: Promise<unknown> = Promise.resolve();
+  private stateWriteQueue: Promise<void> = Promise.resolve();
+  private issueOperationQueues = new Map<string, Promise<unknown>>();
   private flushTimer: NodeJS.Timeout | null = null;
   private logSeq = 1;
   private previews: Previews;
@@ -877,6 +886,12 @@ export class Swarm {
   private async writeState() {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = null;
+    const write = this.stateWriteQueue.catch(() => undefined).then(() => this.writeStateNow());
+    this.stateWriteQueue = write;
+    await write;
+  }
+
+  private async writeStateNow() {
     for (const a of this.state.agents) a.logTail = (this.agentRt.get(a.id)?.log ?? []).slice(-200);
     await fs.mkdir(path.dirname(STATE_FILE), { recursive: true });
     const tmp = `${STATE_FILE}.tmp`;
@@ -1376,7 +1391,8 @@ export class Swarm {
     const repo = this.repo(repoId);
     if (!title.trim()) throw new HttpError(400, 'An issue needs a title');
     const slug = specialtySlug(specialty);
-    const number = await this.fileIssueOperation(idempotencyKey ?? crypto.randomUUID(), repo.fullName, title.trim(), body, slug ? [specialtyLabel(slug)] : [], assignTo);
+    const key = idempotencyKey?.trim() || crypto.randomUUID();
+    const number = await this.fileIssueOperation(key, repo.fullName, title.trim(), body, slug ? [specialtyLabel(slug)] : [], assignTo);
     await this.syncRepo(repo.id);
     this.toast('success', `Issue #${number} filed on ${repo.fullName}`);
     if (assignTo) await this.assign(assignTo, number);
@@ -1385,9 +1401,15 @@ export class Swarm {
   }
 
   private async fileIssueOperation(key: string, fullName: string, title: string, body: string, labels: string[], assignTo?: string) {
-    const operation = this.issueOperationQueue.then(() => this.performIssueOperation(key, fullName, title, body, labels, assignTo));
-    this.issueOperationQueue = operation.catch(() => undefined);
-    return operation;
+    const previous = this.issueOperationQueues.get(key) ?? Promise.resolve();
+    const operation = previous.catch(() => undefined).then(() => this.performIssueOperation(key, fullName, title, body, labels, assignTo));
+    const tail = operation.catch(() => undefined);
+    this.issueOperationQueues.set(key, tail);
+    try {
+      return await operation;
+    } finally {
+      if (this.issueOperationQueues.get(key) === tail) this.issueOperationQueues.delete(key);
+    }
   }
 
   private async performIssueOperation(key: string, fullName: string, title: string, body: string, labels: string[], assignTo?: string) {
@@ -1398,24 +1420,47 @@ export class Swarm {
     if (op && (op.repo !== fullName || op.fingerprint !== fingerprint)) throw new HttpError(409, 'Idempotency key already belongs to a different issue request');
     if (op?.status === 'complete') return op.number!;
     const marker = `<!-- cubefarm-operation: ${crypto.createHash('sha256').update(key).digest('hex')} -->`;
-    if (op) {
-      let found;
-      try { found = await this.backend.findIssueByMarker(fullName, marker); }
-      catch { op.status = 'unresolved'; await this.writeState(); throw new HttpError(503, `Issue operation ${key} is unresolved; remote GitHub reads failed. Retry with the same key after reads recover.`); }
-      if (found) { op.status = 'complete'; op.number = found; await this.writeState(); return found; }
-      op.status = 'pending';
-      await this.writeState();
-    } else {
-      op = { key, repo: fullName, fingerprint, marker, status: 'pending', number: null };
+    if (!op) {
+      op = { key, repo: fullName, fingerprint, marker, status: 'ready', number: null };
       this.state.issueOperations.push(op);
       await this.writeState();
+    } else if (op.status !== 'ready') {
+      return this.reconcileIssueOperation(op);
     }
+
+    // Persist the ambiguous boundary before entering GitHub. A crash with `ready` is safe to retry;
+    // `attempting` means the provider may have committed the write even when no acknowledgement arrived.
+    op.status = 'attempting';
+    await this.writeState();
     try {
       const number = await this.backend.createIssue(fullName, title, `${body.trim()}\n\n${marker}`, labels);
       op.status = 'complete'; op.number = number; await this.writeState(); return number;
     } catch (error) {
       op.status = 'unresolved'; await this.writeState(); throw error;
     }
+  }
+
+  private async reconcileIssueOperation(op: IssueOperation): Promise<number> {
+    const delays = [0, 250, 1_000];
+    for (const delay of delays) {
+      if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+      try {
+        const found = await this.backend.findIssueByMarker(op.repo, op.marker);
+        if (found) {
+          op.status = 'complete';
+          op.number = found;
+          await this.writeState();
+          return found;
+        }
+      } catch {
+        op.status = 'unresolved';
+        await this.writeState();
+        throw new HttpError(503, `Issue operation ${op.key} is unresolved; remote GitHub reads failed. Retry with the same key after reads recover.`);
+      }
+    }
+    op.status = 'unresolved';
+    await this.writeState();
+    throw new HttpError(503, `Issue operation ${op.key} is unresolved; no matching issue became visible after bounded reconciliation. Inspect GitHub before retrying manually.`);
   }
 
   async mergePull(repoId: string, number: number, method: 'squash' | 'merge' | 'rebase' = 'squash') {

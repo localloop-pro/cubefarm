@@ -1,5 +1,24 @@
-import { describe, expect, it } from 'vitest';
-import { checksOf } from './github.ts';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const exec = vi.hoisted(() => ({ gh: vi.fn(), ghJson: vi.fn() }));
+vi.mock('./exec.ts', () => exec);
+import { checksOf, findIssueByMarker } from './github.ts';
+
+beforeEach(() => vi.clearAllMocks());
+
+describe('findIssueByMarker', () => {
+  it('scans every REST issue page without search indexing', async () => {
+    exec.ghJson.mockResolvedValue([
+      [{ number: 1, body: 'ordinary issue' }],
+      [{ number: 2, body: 'body\n<!-- cubefarm-operation: abc -->' }],
+    ]);
+
+    await expect(findIssueByMarker('owner/repo', '<!-- cubefarm-operation: abc -->')).resolves.toBe(2);
+    expect(exec.ghJson).toHaveBeenCalledWith([
+      'api', '--paginate', '--slurp', 'repos/owner/repo/issues?state=all&per_page=100',
+    ]);
+  });
+});
 
 describe('checksOf', () => {
   it('is none with no rollup', () => {

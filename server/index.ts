@@ -132,7 +132,14 @@ app.post('/api/repos/:repo/sync-folder', route((req) => swarm.syncFolderNow(repo
 app.post(
   '/api/repos/:repo/issues',
   route(async (req) => ({
-    number: await swarm.createIssue(repoId(req), str(req.body.title), str(req.body.body), str(req.body.assignTo) || undefined, str(req.body.specialty) || undefined, str(req.body.idempotencyKey)),
+    number: await swarm.createIssue(
+      repoId(req),
+      str(req.body.title),
+      str(req.body.body),
+      str(req.body.assignTo) || undefined,
+      str(req.body.specialty) || undefined,
+      str(req.body.idempotencyKey) || undefined,
+    ),
   })),
 );
 app.post('/api/repos/:repo/plan', route((req) => swarm.planFloor(repoId(req), typeof req.body?.mission === 'string' ? req.body.mission : undefined)));

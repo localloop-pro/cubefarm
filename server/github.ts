@@ -47,11 +47,12 @@ export async function listIssues(fullName: string): Promise<IssueInfo[]> {
     .sort((a, b) => a.number - b.number);
 }
 
-/** Search all issue states for the exact durable marker; never infer absence from the bounded board listing. */
+/** Enumerate every issue page for the exact durable marker; this avoids GitHub search-index visibility lag. */
 export async function findIssueByMarker(fullName: string, marker: string): Promise<number | null> {
-  const rows = await ghJson<{ number: number; body: string }[]>([
-    'issue', 'list', '-R', fullName, '--state', 'all', '--search', marker, '--limit', '100', '--json', 'number,body',
+  const pages = await ghJson<{ number: number; body: string | null; pull_request?: unknown }[][]>([
+    'api', '--paginate', '--slurp', `repos/${fullName}/issues?state=all&per_page=100`,
   ]);
+  const rows = pages.flat();
   return rows.find((issue) => (issue.body ?? '').includes(marker))?.number ?? null;
 }
 
