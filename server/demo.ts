@@ -420,6 +420,7 @@ export function createDemoBackend(): Backend {
       return { fullName: newRepo(name, opts.description), path: `/demo/projects/${name}` };
     },
     listIssues: async (fullName) => [...(repos.get(fullName)?.issues ?? [])],
+    findIssueByMarker: async (fullName, marker) => repos.get(fullName)?.issues.find((i) => i.body.includes(marker))?.number ?? null,
     listPulls: async (fullName) => [...(repos.get(fullName)?.pulls ?? [])],
     createIssue: async (fullName, title, body, labels = []) => {
       const r = repos.get(fullName);
@@ -771,6 +772,7 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
       title: 'Set up the project skeleton',
       body: `Scaffold the app so the rest of the milestone has something to build on.\n\nBrief: ${mission}\n\nAcceptance criteria:\n- The dev server starts\n- A placeholder home page renders\n- Lint, tests and build scripts exist`,
       specialty: 'frontend',
+      idempotency_key: crypto.randomUUID(),
     });
     const n = Number(first.match(/#(\d+)/)?.[1] ?? 0);
     await use('file_issue', {
@@ -778,12 +780,14 @@ function ceoSession(opts: SessionOptions, cb: SessionCallbacks): SessionHandle {
       title: `Build the core: ${short(mission, 60)}`,
       body: `${n ? `Depends on #${n}\n\n` : ''}Implement the heart of the brief.\n\nAcceptance criteria:\n- The main flow works end to end\n- Covered by tests`,
       specialty: 'frontend',
+      idempotency_key: crypto.randomUUID(),
     });
     await use('file_issue', {
       floor,
       title: 'Polish: phone layout and empty states',
       body: `${n ? `Depends on #${n}\n\n` : ''}Make every screen work at 375px and add friendly empty states.`,
       specialty: 'frontend',
+      idempotency_key: crypto.randomUUID(),
     });
     if (!team.some((a) => a.specialty === 'frontend')) {
       await use('propose_hire', { floor, role: 'dev', ...GENERIC.hires[0], reason: 'All three issues are UI work and nobody on the floor owns the frontend yet.' });

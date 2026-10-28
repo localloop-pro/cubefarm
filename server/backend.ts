@@ -15,6 +15,7 @@ export interface Backend {
   listMyRepos(owner?: string): Promise<GhRepoSummary[]>;
   repoMeta(fullName: string): Promise<github.RepoMeta>;
   listIssues(fullName: string): Promise<IssueInfo[]>;
+  findIssueByMarker(fullName: string, marker: string): Promise<number | null>;
   listPulls(fullName: string): Promise<PullInfo[]>;
   createIssue(fullName: string, title: string, body: string, labels?: string[]): Promise<number>;
   /** OPEN or CLOSED; null when there is no such issue. */
@@ -67,6 +68,7 @@ export const realBackend: Backend = {
   listMyRepos: github.listMyRepos,
   repoMeta: github.repoMeta,
   listIssues: github.listIssues,
+  findIssueByMarker: github.findIssueByMarker,
   listPulls: github.listPulls,
   createIssue: github.createIssue,
   issueState: github.issueState,

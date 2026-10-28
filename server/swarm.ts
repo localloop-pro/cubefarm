@@ -140,7 +140,10 @@ interface Persisted {
   ceo: CeoState;
   messages: PhoneMessage[];
   phoneReadAt: number;
+  issueOperations: IssueOperation[];
 }
+
+interface IssueOperation { key: string; repo: string; fingerprint: string; marker: string; status: 'pending' | 'unresolved' | 'complete'; number: number | null }
 
 interface Shot {
   data: Buffer;
@@ -403,6 +406,7 @@ export class Swarm {
     ceo: { queue: [], job: null, lastReviewAt: null, lastFingerprint: null },
     messages: [],
     phoneReadAt: 0,
+    issueOperations: [],
   };
   /**
    * The CEO's office tools. Every session gets its own server: one can only be connected to one session at a time, so
@@ -428,6 +432,7 @@ export class Swarm {
   private user: string | null = null;
   private ghError: string | undefined;
   private saveTimer: NodeJS.Timeout | null = null;
+  private issueOperationQueue: Promise<unknown> = Promise.resolve();
   private flushTimer: NodeJS.Timeout | null = null;
   private logSeq = 1;
   private previews: Previews;
@@ -503,6 +508,7 @@ export class Swarm {
         ceo: { ...this.state.ceo, ...loaded.ceo },
         messages: loaded.messages ?? [],
         phoneReadAt: loaded.phoneReadAt ?? 0,
+        issueOperations: loaded.issueOperations ?? [],
       };
       for (const m of this.state.messages) this.messageSeq = Math.max(this.messageSeq, m.id + 1);
       if (!EFFORTS.includes(this.state.settings.defaultEffort)) this.state.settings.defaultEffort = 'medium';
@@ -1366,16 +1372,50 @@ export class Swarm {
     this.save();
   }
 
-  async createIssue(repoId: string, title: string, body: string, assignTo?: string, specialty?: string) {
+  async createIssue(repoId: string, title: string, body: string, assignTo?: string, specialty?: string, idempotencyKey?: string) {
     const repo = this.repo(repoId);
     if (!title.trim()) throw new HttpError(400, 'An issue needs a title');
     const slug = specialtySlug(specialty);
-    const number = await this.backend.createIssue(repo.fullName, title.trim(), body, slug ? [specialtyLabel(slug)] : []);
+    const number = await this.fileIssueOperation(idempotencyKey ?? crypto.randomUUID(), repo.fullName, title.trim(), body, slug ? [specialtyLabel(slug)] : []);
     await this.syncRepo(repo.id);
     this.toast('success', `Issue #${number} filed on ${repo.fullName}`);
     if (assignTo) await this.assign(assignTo, number);
     else setTimeout(() => this.schedule(), 200);
     return number;
+  }
+
+  private async fileIssueOperation(key: string, fullName: string, title: string, body: string, labels: string[]) {
+    const operation = this.issueOperationQueue.then(() => this.performIssueOperation(key, fullName, title, body, labels));
+    this.issueOperationQueue = operation.catch(() => undefined);
+    return operation;
+  }
+
+  private async performIssueOperation(key: string, fullName: string, title: string, body: string, labels: string[]) {
+    if (!/^[\w-]{8,128}$/.test(key)) throw new HttpError(400, 'Invalid idempotency key');
+    const normalized = JSON.stringify({ title: title.trim(), body: body.trim(), labels: [...labels].sort() });
+    const fingerprint = crypto.createHash('sha256').update(normalized).digest('hex');
+    let op = this.state.issueOperations.find((x) => x.key === key);
+    if (op && (op.repo !== fullName || op.fingerprint !== fingerprint)) throw new HttpError(409, 'Idempotency key already belongs to a different issue request');
+    if (op?.status === 'complete') return op.number!;
+    const marker = `<!-- cubefarm-operation: ${crypto.createHash('sha256').update(key).digest('hex')} -->`;
+    if (op) {
+      let found;
+      try { found = await this.backend.findIssueByMarker(fullName, marker); }
+      catch { op.status = 'unresolved'; await this.writeState(); throw new HttpError(503, `Issue operation ${key} is unresolved; remote GitHub reads failed. Retry with the same key after reads recover.`); }
+      if (found) { op.status = 'complete'; op.number = found; await this.writeState(); return found; }
+      op.status = 'pending';
+      await this.writeState();
+    } else {
+      op = { key, repo: fullName, fingerprint, marker, status: 'pending', number: null };
+      this.state.issueOperations.push(op);
+      await this.writeState();
+    }
+    try {
+      const number = await this.backend.createIssue(fullName, title, `${body.trim()}\n\n${marker}`, labels);
+      op.status = 'complete'; op.number = number; await this.writeState(); return number;
+    } catch (error) {
+      op.status = 'unresolved'; await this.writeState(); throw error;
+    }
   }
 
   async mergePull(repoId: string, number: number, method: 'squash' | 'merge' | 'rebase' = 'squash') {
@@ -3306,14 +3346,14 @@ export class Swarm {
     return `Proposed letting ${a.name} go. The manager will decide (request ${req.id}).`;
   }
 
-  private async fileIssue(x: { floor: number; title: string; body: string; specialty?: string }) {
+  private async fileIssue(x: { floor: number; title: string; body: string; specialty?: string; idempotency_key: string }) {
     const repo = this.floorRepo(x.floor);
     this.ceoIssues.check();
     const title = String(x.title ?? '').trim().slice(0, 120);
     if (!title) throw new Error('An issue needs a title.');
     const slug = specialtySlug(x.specialty);
     const body = `${String(x.body ?? '').trim()}\n\n---\n_Filed by ${this.ceo().name}, the cubefarm CEO._`;
-    const n = await this.backend.createIssue(repo.fullName, title, body, slug ? [specialtyLabel(slug)] : []);
+    const n = await this.fileIssueOperation(x.idempotency_key, repo.fullName, title, body, slug ? [specialtyLabel(slug)] : []);
     this.ceoIssues.record(repo.id);
     return `Filed #${n} on floor ${repo.floor}: ${title}${slug ? ` (routed to ${slug})` : ''}.`;
   }
