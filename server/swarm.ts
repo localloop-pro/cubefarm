@@ -1376,7 +1376,7 @@ export class Swarm {
     const repo = this.repo(repoId);
     if (!title.trim()) throw new HttpError(400, 'An issue needs a title');
     const slug = specialtySlug(specialty);
-    const number = await this.fileIssueOperation(idempotencyKey ?? crypto.randomUUID(), repo.fullName, title.trim(), body, slug ? [specialtyLabel(slug)] : []);
+    const number = await this.fileIssueOperation(idempotencyKey ?? crypto.randomUUID(), repo.fullName, title.trim(), body, slug ? [specialtyLabel(slug)] : [], assignTo);
     await this.syncRepo(repo.id);
     this.toast('success', `Issue #${number} filed on ${repo.fullName}`);
     if (assignTo) await this.assign(assignTo, number);
@@ -1384,15 +1384,15 @@ export class Swarm {
     return number;
   }
 
-  private async fileIssueOperation(key: string, fullName: string, title: string, body: string, labels: string[]) {
-    const operation = this.issueOperationQueue.then(() => this.performIssueOperation(key, fullName, title, body, labels));
+  private async fileIssueOperation(key: string, fullName: string, title: string, body: string, labels: string[], assignTo?: string) {
+    const operation = this.issueOperationQueue.then(() => this.performIssueOperation(key, fullName, title, body, labels, assignTo));
     this.issueOperationQueue = operation.catch(() => undefined);
     return operation;
   }
 
-  private async performIssueOperation(key: string, fullName: string, title: string, body: string, labels: string[]) {
+  private async performIssueOperation(key: string, fullName: string, title: string, body: string, labels: string[], assignTo?: string) {
     if (!/^[\w-]{8,128}$/.test(key)) throw new HttpError(400, 'Invalid idempotency key');
-    const normalized = JSON.stringify({ title: title.trim(), body: body.trim(), labels: [...labels].sort() });
+    const normalized = JSON.stringify({ title: title.trim(), body: body.trim(), labels: [...labels].sort(), assignTo: assignTo ?? null });
     const fingerprint = crypto.createHash('sha256').update(normalized).digest('hex');
     let op = this.state.issueOperations.find((x) => x.key === key);
     if (op && (op.repo !== fullName || op.fingerprint !== fingerprint)) throw new HttpError(409, 'Idempotency key already belongs to a different issue request');
@@ -3353,7 +3353,7 @@ export class Swarm {
     if (!title) throw new Error('An issue needs a title.');
     const slug = specialtySlug(x.specialty);
     const body = `${String(x.body ?? '').trim()}\n\n---\n_Filed by ${this.ceo().name}, the cubefarm CEO._`;
-    const n = await this.fileIssueOperation(x.idempotency_key, repo.fullName, title, body, slug ? [specialtyLabel(slug)] : []);
+    const n = await this.fileIssueOperation(x.idempotency_key, repo.fullName, title, body, slug ? [specialtyLabel(slug)] : [], undefined);
     this.ceoIssues.record(repo.id);
     return `Filed #${n} on floor ${repo.floor}: ${title}${slug ? ` (routed to ${slug})` : ''}.`;
   }

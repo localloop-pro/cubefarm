@@ -126,6 +126,15 @@ describe('durable issue filing idempotency', () => {
     await expect(s.createIssue(repoId, 'Other task', 'Body', undefined, undefined, key)).rejects.toThrow('different issue request');
     expect(remote.issueWrites).toBe(1);
   });
+  it('rejects an assignee mismatch before a second assignment or GitHub write', async () => {
+    const s = await ready();
+    const assign = vi.spyOn(s, 'assign').mockResolvedValue(undefined as never);
+    await expect(s.createIssue(repoId, 'New task', 'Body', 'agent-A', undefined, key)).resolves.toBe(40);
+    await expect(s.createIssue(repoId, 'New task', 'Body', 'agent-B', undefined, key)).rejects.toThrow('different issue request');
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(assign).toHaveBeenCalledWith('agent-A', 40);
+    expect(remote.issueWrites).toBe(1);
+  });
   it('keeps an uncertain operation unresolved when remote reads are unavailable', async () => {
     const s = await ready();
     calls.createIssue.mockRejectedValueOnce(new Error('unknown write outcome'));
