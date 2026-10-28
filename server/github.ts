@@ -53,7 +53,8 @@ export async function findIssueByMarker(fullName: string, marker: string): Promi
     'api', '--paginate', '--slurp', `repos/${fullName}/issues?state=all&per_page=100`,
   ]);
   const rows = pages.flat();
-  return rows.find((issue) => (issue.body ?? '').includes(marker))?.number ?? null;
+  // The issues endpoint's rows include pull requests (marked with `pull_request`); only a real issue counts.
+  return rows.find((issue) => !issue.pull_request && (issue.body ?? '').includes(marker))?.number ?? null;
 }
 
 interface RawPull {

@@ -18,6 +18,25 @@ describe('findIssueByMarker', () => {
       'api', '--paginate', '--slurp', 'repos/owner/repo/issues?state=all&per_page=100',
     ]);
   });
+
+  it('ignores a pull request row with the marker and matches the real issue', async () => {
+    exec.ghJson.mockResolvedValue([
+      [
+        { number: 3, body: 'body\n<!-- cubefarm-operation: abc -->', pull_request: {} },
+        { number: 4, body: 'body\n<!-- cubefarm-operation: abc -->' },
+      ],
+    ]);
+
+    await expect(findIssueByMarker('owner/repo', '<!-- cubefarm-operation: abc -->')).resolves.toBe(4);
+  });
+
+  it('returns null when only a pull request carries the marker', async () => {
+    exec.ghJson.mockResolvedValue([
+      [{ number: 3, body: 'body\n<!-- cubefarm-operation: abc -->', pull_request: {} }],
+    ]);
+
+    await expect(findIssueByMarker('owner/repo', '<!-- cubefarm-operation: abc -->')).resolves.toBeNull();
+  });
 });
 
 describe('checksOf', () => {
