@@ -102,11 +102,15 @@ beforeEach(async () => {
 describe('durable issue filing idempotency', () => {
   const key = 'manager-retry-key-0001';
   async function ready() { const x = await seed(); return x.s; }
-  it('retries after interruption before write and writes once', async () => {
+  it('retries a durably ready operation interrupted before the GitHub write', async () => {
     const s = await ready();
-    calls.createIssue.mockRejectedValueOnce(new Error('interrupted before write'));
+    const writeNow = s.writeStateNow.bind(s);
+    vi.spyOn(s, 'writeStateNow').mockImplementationOnce(writeNow).mockRejectedValueOnce(new Error('interrupted before write'));
     await expect(s.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).rejects.toThrow('interrupted before write');
-    await expect(s.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).resolves.toBe(40);
+    expect(calls.createIssue).not.toHaveBeenCalled();
+
+    const restarted = await restart('issue:before-write');
+    await expect(restarted.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).resolves.toBe(40);
     expect(remote.issueWrites).toBe(1);
   });
   it('recovers creation after remote write before local acknowledgement', async () => {
@@ -119,12 +123,97 @@ describe('durable issue filing idempotency', () => {
     expect(remote.issueWrites).toBe(0);
     expect(remote.events).toContain('read-issues');
   });
+  it('waits through delayed marker visibility and never creates a second issue', async () => {
+    const s = await ready();
+    calls.createIssue.mockImplementationOnce(async (_r: string, _t: string, body: string) => {
+      remote.issueWrites++;
+      remote.issues.push({ number: 41, body });
+      throw new Error('ack lost');
+    });
+    await expect(s.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).rejects.toThrow('ack lost');
+
+    const restarted = await restart('issue:delayed-marker');
+    calls.findIssueByMarker
+      .mockResolvedValueOnce(null)
+      .mockImplementation(async (_repo: string, marker: string) => remote.issues.find((i: Any) => i.body.includes(marker))?.number ?? null);
+    const retry = restarted.createIssue(repoId, 'New task', 'Body', undefined, undefined, key);
+    await vi.advanceTimersByTimeAsync(250);
+    await expect(retry).resolves.toBe(41);
+    expect(remote.issueWrites).toBe(1);
+    expect(calls.createIssue).toHaveBeenCalledTimes(1);
+  });
+  it('serializes an autosave already in flight before checkpointing and survives restart without a duplicate', async () => {
+    const s = await ready();
+    const writeFile = fs.writeFile.bind(fs);
+    let releaseWrite!: () => void;
+    let reportStarted!: () => void;
+    const blocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const started = new Promise<void>((resolve) => { reportStarted = resolve; });
+    vi.spyOn(fs, 'writeFile').mockImplementationOnce(async (...args: Parameters<typeof fs.writeFile>) => {
+      reportStarted();
+      await blocked;
+      return writeFile(...args);
+    });
+    s.save();
+    const autosave = vi.advanceTimersByTimeAsync(1_500);
+    await started;
+
+    calls.createIssue.mockImplementationOnce(async (_r: string, _t: string, body: string) => {
+      remote.issueWrites++;
+      remote.issues.push({ number: 42, body });
+      throw new Error('ack lost');
+    });
+    const filing = s.createIssue(repoId, 'New task', 'Body', undefined, undefined, key);
+    await Promise.resolve();
+    expect(calls.createIssue).not.toHaveBeenCalled();
+    releaseWrite();
+    await autosave;
+    await expect(filing).rejects.toThrow('ack lost');
+
+    const restarted = await restart('issue:autosave-race');
+    await expect(restarted.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).resolves.toBe(42);
+    expect(remote.issueWrites).toBe(1);
+    expect(calls.createIssue).toHaveBeenCalledTimes(1);
+  });
   it('returns the recorded result for a duplicate key and rejects payload mismatch', async () => {
     const s = await ready();
     await expect(s.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).resolves.toBe(40);
     await expect(s.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).resolves.toBe(40);
     await expect(s.createIssue(repoId, 'Other task', 'Body', undefined, undefined, key)).rejects.toThrow('different issue request');
     expect(remote.issueWrites).toBe(1);
+  });
+  it('generates keys for pre-upgrade missing or empty callers and rejects malformed supplied keys', async () => {
+    const s = await ready();
+    await expect(s.createIssue(repoId, 'Missing key', 'Body')).resolves.toBe(40);
+    await expect(s.createIssue(repoId, 'Empty key', 'Body', undefined, undefined, '')).resolves.toBe(41);
+    await expect(s.createIssue(repoId, 'Malformed key', 'Body', undefined, undefined, 'bad!')).rejects.toThrow('Invalid idempotency key');
+    expect(remote.issueWrites).toBe(2);
+  });
+  it('keeps duplicate keys single-writer while independent keys progress concurrently', async () => {
+    const s = await ready();
+    let releaseWrites!: () => void;
+    let reportTwo!: () => void;
+    const released = new Promise<void>((resolve) => { releaseWrites = resolve; });
+    const twoStarted = new Promise<void>((resolve) => { reportTwo = resolve; });
+    calls.createIssue.mockImplementation(async (_repo: string, _title: string, body: string) => {
+      remote.issueWrites++;
+      const number = 39 + remote.issueWrites;
+      if (remote.issueWrites === 2) reportTwo();
+      await released;
+      remote.issues.push({ number, body });
+      return number;
+    });
+
+    const first = s.createIssue(repoId, 'First', 'Body', undefined, undefined, 'independent-key-1');
+    const duplicate = s.createIssue(repoId, 'First', 'Body', undefined, undefined, 'independent-key-1');
+    const independent = s.createIssue(repoId, 'Second', 'Body', undefined, undefined, 'independent-key-2');
+    await twoStarted;
+    expect(calls.createIssue).toHaveBeenCalledTimes(2);
+    releaseWrites();
+    const [one, duplicateOne, two] = await Promise.all([first, duplicate, independent]);
+    expect(duplicateOne).toBe(one);
+    expect(two).not.toBe(one);
+    expect(remote.issueWrites).toBe(2);
   });
   it('rejects an assignee mismatch before a second assignment or GitHub write', async () => {
     const s = await ready();
@@ -146,6 +235,22 @@ describe('durable issue filing idempotency', () => {
     expect(remote.issueWrites).toBe(0);
     expect(restarted.state.issueOperations[0]).toMatchObject({ status: 'unresolved', number: null });
     gates(restarted);
+  });
+  it('fails closed after bounded misses and never replays a legacy pending write', async () => {
+    const s = await ready();
+    calls.createIssue.mockRejectedValueOnce(new Error('unknown write outcome'));
+    await expect(s.createIssue(repoId, 'New task', 'Body', undefined, undefined, key)).rejects.toThrow('unknown write outcome');
+    s.state.issueOperations[0].status = 'pending'; // The pre-hardening format used this status while a write could be in flight.
+    await s.writeState();
+
+    const restarted = await restart('issue:legacy-pending-misses');
+    calls.findIssueByMarker.mockResolvedValue(null);
+    const retry = restarted.createIssue(repoId, 'New task', 'Body', undefined, undefined, key);
+    await vi.advanceTimersByTimeAsync(1_250);
+    await expect(retry).rejects.toThrow('no matching issue became visible');
+    expect(calls.findIssueByMarker).toHaveBeenCalledTimes(3);
+    expect(calls.createIssue).toHaveBeenCalledTimes(1);
+    expect(restarted.state.issueOperations[0]).toMatchObject({ status: 'unresolved', number: null });
   });
 });
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
