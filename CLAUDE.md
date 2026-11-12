@@ -31,7 +31,8 @@ It ships on npm as `cubefarm` (`npx cubefarm`); it used to be called Office Swar
   `SWARM_CLIENT_PORT`.
 - Agents are ordinary coding-agent CLI sessions on the manager's own setup, unsandboxed, by the manager's choice. The
   office's workflow rules (no pushes to the default branch, no merging, QA leaves GitHub alone) live in their prompts
-  and instructions, not in enforcement: don't add hooks, permission rules or sandboxes that refuse tool calls.
+  and are also enforced by agent tool permissions and a per-desk Git pre-push hook. These checks are best-effort,
+  not a sandbox; they do not replace review or repository-side protections.
   `ANTHROPIC_*` / `CLAUDE_*` are stripped from agent and preview env.
 
 ## Scripts
@@ -61,8 +62,8 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
 - `agentRunner.ts`: one Agent SDK session; options, env stripping, Playwright MCP, and turning the SDK stream into
   terminal lines.
 - `cliRunner.ts`: the terminal runtime (the default): one agent as the real CLI in a node-pty, same session contract
-  as `agentRunner.ts`. Claude Code reports through HTTP hooks (`POST /api/hooks/:token`; PreToolUse approves every
-  call); Codex reports turn endings (notify) and, once the manager trusts them, its steps (`-c hooks.*`); OpenCode
+  as `agentRunner.ts`. Claude Code reports through HTTP hooks (`POST /api/hooks/:token`; PreToolUse checks agent safety rules before
+  calls); Codex reports turn endings (notify) and, once the manager trusts them, its steps (`-c hooks.*`); OpenCode
   only turn endings. Codex/OpenCode screenshots are collected from the session's Playwright output folder. Esc in a
   terminal ends the session as `interrupted`. The CEO's office tools are served over MCP (`/api/mcp/:token`).
 - `ptyHost.ts`: the terminal keeper, a detached process of its own (`launch` re-spawns it outside the office's process
@@ -80,6 +81,7 @@ Server (`server/`, Node + Express 5 + ws, run by tsx in development; esbuild bun
 - `github.ts`: all GitHub access through the `gh` CLI.
 - `workspace.ts`: floor checkouts, per-agent worktrees (`<SWARM_HOME>/workspaces/<owner>__<repo>/desks/<agent>`),
   fast-forwarding main, per-repo git lock, stopping processes an agent left running.
+- `gitSafety.ts`: shell-command checks, agent permission decisions, and the worktree-local pre-push guard.
 - `exec.ts`: `run` / `git` / `gh`: `execFile` without a shell, prompts disabled, `CommandError` with stderr.
 - `previews.ts`: one preview per floor: ports (6300 + floor), statuses, config validation.
 - `previewRunner.ts`: checks out, installs and runs a floor's app in its preview worktree; kills the process tree.

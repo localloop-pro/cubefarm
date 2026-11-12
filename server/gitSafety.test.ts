@@ -17,6 +17,9 @@ describe('checkAgentShellCommand', () => {
   it('blocks force-push', () => {
     expect(checkAgentShellCommand('git push --force origin feature/x', dev)).toMatch(/force/i);
     expect(checkAgentShellCommand('git push -f origin feature/x', dev)).toMatch(/force/i);
+    expect(checkAgentShellCommand('git -C /tmp push origin +feature', dev)).not.toBeNull();
+    expect(checkAgentShellCommand('git -C /tmp push origin main', dev)).not.toBeNull();
+    expect(checkAgentShellCommand('git push --no-verify origin feature', dev)).not.toBeNull();
   });
 
   it('blocks gh pr merge', () => {
@@ -47,16 +50,27 @@ describe('preToolUseForAgent', () => {
 });
 
 describe('installAgentGitHooks', () => {
-  it('blocks pre-push to main in the worktree', async () => {
+  it('isolates the hook from the main checkout and worktree files, and blocks protected pushes', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cf-git-safety-'));
     try {
-      await git(['init', '-b', 'main'], { cwd: root });
-      await git(['commit', '--allow-empty', '-m', 'init'], { cwd: root });
+      const main = path.join(root, 'main');
+      const remote = path.join(root, 'remote.git');
       const wt = path.join(root, 'desk');
-      await git(['worktree', 'add', '-b', 'feature', wt, 'HEAD'], { cwd: root });
+      await fs.mkdir(main);
+      await git(['init', '--bare', remote], { cwd: root });
+      await git(['init', '-b', 'main'], { cwd: main });
+      await git(['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-m', 'init'], { cwd: main });
+      await git(['remote', 'add', 'origin', remote], { cwd: main });
+      await git(['worktree', 'add', '-b', 'feature', wt, 'HEAD'], { cwd: main });
       await installAgentGitHooks(wt, 'main');
-      await git(['commit', '--allow-empty', '-m', 'work'], { cwd: wt });
-      await expect(git(['push', 'origin', 'HEAD:refs/heads/main'], { cwd: wt })).rejects.toThrow();
+      await expect(git(['config', '--get', 'core.hooksPath'], { cwd: main })).rejects.toThrow();
+      const hooks = await git(['config', '--get', 'core.hooksPath'], { cwd: wt });
+      expect(path.isAbsolute(hooks)).toBe(true);
+      expect(await git(['status', '--porcelain'], { cwd: wt })).toBe('');
+      await git(['add', '-A'], { cwd: wt });
+      expect(await git(['diff', '--cached', '--name-only'], { cwd: wt })).toBe('');
+      await git(['push', 'origin', 'HEAD:refs/heads/feature'], { cwd: wt });
+      await expect(git(['push', 'origin', 'HEAD:refs/heads/main'], { cwd: wt })).rejects.toThrow(/cubefarm/);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
