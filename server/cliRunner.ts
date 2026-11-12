@@ -25,12 +25,13 @@ import {
 import type { OfficeTools } from './ceo.ts';
 import type { AgentTerminal } from './terminal.ts';
 import type { AgentCli } from '../shared/types.ts';
+import { allowPreToolUse, preToolUseForAgent, type GitSafetyPolicy } from './gitSafety.ts';
 
 // One agent session as the real CLI in a pseudo-terminal: the same contract as the Agent SDK runner (log lines, the
 // current tool, the final text, finished), so the rest of the office doesn't care which runtime an agent uses.
 //
-// Claude Code reports through HTTP hooks passed with --settings: every tool call (PreToolUse also approves it, so the
-// CLI never stops to ask), each finished turn (Stop, with the final text), failures (StopFailure) and, through its
+// Claude Code reports through HTTP hooks passed with --settings: every tool call (PreToolUse allows or denies git/GitHub
+// operations per office rules, so the CLI never stops to ask), each finished turn (Stop, with the final text), failures
 // status line, cost and usage limits. Codex says when a turn ends (notify) and, once the manager trusts the office's
 // hooks in its /hooks, reports its steps through them too. OpenCode's plugin only says when a turn ends.
 //
@@ -181,8 +182,8 @@ let hooksHinted = false;
 /** A CLI left at its prompt this long is closed; its session can still be resumed. */
 const IDLE_MS = 30 * 60_000;
 
-/** PreToolUse's answer: nobody may be watching to answer a permission question, so every tool call is approved. */
-const ALLOW = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: 'Approved by cubefarm' } };
+/** PreToolUse when there is no active git policy (e.g. the CEO's MCP-only session). */
+const ALLOW = allowPreToolUse;
 
 const toolInput = (b: Record<string, unknown>) => (b.tool_input && typeof b.tool_input === 'object' ? b.tool_input : {}) as Record<string, unknown>;
 
@@ -462,6 +463,8 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     return { statusLine };
   };
 
+  const gitPolicy: GitSafetyPolicy = { defaultBranch: opts.defaultBranch ?? 'main', role: opts.role };
+
   const hook = (b: Record<string, unknown>): Record<string, unknown> => {
     const event = String(b.hook_event_name ?? '');
     const sub = typeof b.agent_id === 'string' && b.agent_id !== ''; // a subagent's call: kept off the log
@@ -484,7 +487,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
           cb.tool(name);
           if (name === 'mcp__playwright__browser_navigate' && typeof input.url === 'string') cb.browserUrl(input.url);
         }
-        return ALLOW;
+        return preToolUseForAgent(name, input, gitPolicy);
       }
       case 'PostToolUse':
       case 'PostToolUseFailure': {
@@ -673,6 +676,7 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
     sessionId,
     name: opts.label ?? 'cubefarm',
     role: opts.role,
+    defaultBranch: opts.defaultBranch ?? 'main',
     additionalDirectories: opts.additionalDirectories,
     files,
     notify: { script: path.join(BIN_DIR, 'notify.cjs'), url: hookUrl },

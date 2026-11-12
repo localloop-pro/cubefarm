@@ -83,6 +83,7 @@ describe('launchArgs', () => {
     sessionId: '11111111-1111-1111-1111-111111111111',
     name: 'Ada · #1',
     role: 'dev',
+    defaultBranch: 'main',
     additionalDirectories: [],
     files: { settings: 'settings.json', mcp: null, system: 'instructions.md' },
     notify: { script: 'notify.cjs', url: 'http://127.0.0.1:1/api/hooks/t' },
@@ -134,7 +135,13 @@ describe('launchArgs', () => {
 
   it("lets OpenCode run without stopping to ask, and without updating itself", () => {
     const config = (patch: Partial<LaunchContext>) => JSON.parse(launchArgs('opencode', ctx(patch)).env.OPENCODE_CONFIG_CONTENT);
-    for (const role of ['dev', 'qa'] as const) expect(config({ role }).permission).toEqual({ edit: 'allow', bash: 'allow', webfetch: 'allow' });
+    const devCfg = config({ role: 'dev' });
+    expect(devCfg.permission.edit).toBe('allow');
+    expect(devCfg.permission.bash['gh pr merge *']).toBe('deny');
+    expect(devCfg.permission.bash['*']).toBe('allow');
+    const qaCfg = config({ role: 'qa' });
+    expect(qaCfg.permission.edit).toBe('deny');
+    expect(qaCfg.permission.bash['git push *']).toBe('deny');
     expect(config({}).autoupdate).toBe(false);
   });
 });

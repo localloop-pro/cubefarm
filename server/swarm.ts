@@ -481,7 +481,7 @@ export class Swarm {
         settings: { ...this.state.settings, ...loaded.settings },
         repos: (loaded.repos ?? []).map((r) => ({
           ...r,
-          autoMerge: r.autoMerge ?? true,
+          autoMerge: r.autoMerge ?? false,
           links: r.links ?? [],
           mission: r.mission ?? '',
           summary: r.summary ?? '',
@@ -1009,7 +1009,7 @@ export class Swarm {
       floor,
       color: FLOOR_COLORS[(floor - 1) % FLOOR_COLORS.length],
       autoAssign: !!opts.autoAssign,
-      autoMerge: true,
+      autoMerge: false,
       browserTesting: true,
       links: [],
       localPath: folder,
@@ -1884,6 +1884,7 @@ export class Swarm {
         effort: a.effort || this.state.settings.defaultEffort,
         browserTesting: repo.browserTesting,
         additionalDirectories: this.linkedRepos(repo).map((r) => this.backend.mainDir(r.fullName)),
+        defaultBranch: repo.defaultBranch,
         role: a.task === 'qa' ? 'qa' : a.role, // a developer covering QA works under QA's rules
         outputSchema,
         // A developer's CLI stays at its prompt afterwards, for the manager and for follow-ups; QA's closes.

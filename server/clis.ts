@@ -3,6 +3,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { run } from './exec.ts';
 import type { AgentCli, CliView, EffortLevel } from '../shared/types.ts';
+import { opencodeBashPermissions, type GitSafetyPolicy } from './gitSafety.ts';
 
 // The coding-agent CLIs an agent can run in its terminal, how to find them on this machine, and how to start one on
 // a task. Claude Code is fully wired in: its hooks report every tool call to the office.
@@ -139,6 +140,7 @@ export interface LaunchContext {
   sessionId: string; // the id the office gives a new Claude Code session
   name: string; // shown in Claude Code's prompt box and the terminal title
   role: 'dev' | 'qa' | 'ceo';
+  defaultBranch: string;
   additionalDirectories: string[];
   /** Files the office wrote for this session (settings, MCP config, instructions). */
   files: { settings: string; mcp: string | null; system: string };
@@ -217,11 +219,16 @@ export function launchArgs(id: AgentCli, ctx: LaunchContext): Launch {
       return { args: ctx.resumeId ? ['resume', ...args, ctx.resumeId, ctx.prompt] : [...args, '--', ctx.prompt], env: { CUBEFARM_HOOK_URL: ctx.notify.url } };
     }
     case 'opencode': {
+      const gitPolicy: GitSafetyPolicy = { defaultBranch: ctx.defaultBranch, role: ctx.role };
       const config = {
         plugin: [ctx.plugin],
         instructions: [ctx.files.system],
         autoupdate: false, // several agents starting at once must not each reinstall it
-        permission: { edit: 'allow', bash: 'allow', webfetch: 'allow' }, // it can't stop to ask either
+        permission: {
+          edit: ctx.role === 'qa' ? 'deny' : 'allow',
+          bash: opencodeBashPermissions(gitPolicy),
+          webfetch: 'allow',
+        },
         ...(ctx.browser ? { mcp: { playwright: { type: 'local', command: [ctx.browser.command, ...ctx.browser.args], enabled: true } } } : {}),
       };
       // No project argument: it starts in its terminal's folder, and a desk path in its command line would make the
@@ -348,15 +355,19 @@ if (event.type === 'agent-turn-complete') {
 `;
 
 /** Codex's hook program: passes what Codex tells a hook on to the office and answers nothing, so Codex carries on as usual. */
-export const CODEX_HOOK_SOURCE = String.raw`// cubefarm: Codex's hooks. Tells the office what Codex is doing; never changes what it does.
+export const CODEX_HOOK_SOURCE = String.raw`// cubefarm: Codex's hooks. Forwards to the office and returns its PreToolUse decision (allow/deny).
 const url = process.env.CUBEFARM_HOOK_URL;
 const chunks = [];
 process.stdin.on('data', (c) => chunks.push(c));
 process.stdin.on('end', async () => {
+  let out = {};
   try {
-    if (url) await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: Buffer.concat(chunks), signal: AbortSignal.timeout(5000) });
+    if (url) {
+      const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: Buffer.concat(chunks), signal: AbortSignal.timeout(5000) });
+      if (res.ok) out = await res.json().catch(() => ({}));
+    }
   } catch {}
-  process.stdout.write('{}');
+  process.stdout.write(JSON.stringify(out));
 });
 `;
 

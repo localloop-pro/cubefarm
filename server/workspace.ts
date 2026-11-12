@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { WORKSPACE_ROOT } from './config.ts';
 import { gh, git, run } from './exec.ts';
+import { installAgentGitHooks } from './gitSafety.ts';
 
 // Layout on disk:
 //   <your projects folder>/<repo>                    the floor's main checkout: your own folder, only fetched and fast-forwarded (syncMain)
@@ -335,6 +336,7 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
         await git(['reset', '--hard', ref], { cwd: wt });
         // Untracked leftovers from the last task go; ignored files (node_modules, build caches) stay.
         await git(['clean', '-fd'], { cwd: wt }).catch(() => undefined);
+        await installAgentGitHooks(wt, base.defaultBranch);
         return wt;
       } catch {
         // fall through and rebuild the worktree from scratch
@@ -354,6 +356,7 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
     await git(['worktree', 'prune'], { cwd: main });
     await fs.mkdir(path.dirname(wt), { recursive: true });
     await git(['worktree', 'add', '-B', branch, wt, ref], { cwd: main });
+    await installAgentGitHooks(wt, base.defaultBranch);
     return wt;
   });
 }
