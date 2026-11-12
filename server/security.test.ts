@@ -1,76 +1,16 @@
-import { describe, expect, it, beforeAll } from 'vitest';
-import { WebSocketServer } from 'ws';
+import { describe, expect, it } from 'vitest';
 import http from 'node:http';
-import express, { type Request, type Response } from 'express';
+import express, { type Response } from 'express';
 import crypto from 'node:crypto';
+import { createRequestBoundary } from './requestBoundary.ts';
 
 // Mock session token for testing
 const TEST_SESSION_TOKEN = crypto.randomBytes(32).toString('hex');
 const TEST_PORT = 9999;
-const ALLOWED_HOSTS = [`localhost:${TEST_PORT}`, `127.0.0.1:${TEST_PORT}`];
-const ALLOWED_ORIGINS = [`http://localhost:${TEST_PORT}`, `http://127.0.0.1:${TEST_PORT}`];
-
-// Validation functions (mirrors from index.ts)
-function validateOrigin(req: Request, _res: Response, next: Function) {
-  const host = req.headers.host;
-  const origin = req.headers.origin;
-  if (host && !ALLOWED_HOSTS.includes(host)) throw new Error('Invalid Host header');
-  if (origin && !ALLOWED_ORIGINS.includes(origin)) throw new Error('Invalid Origin');
-  next();
-}
-
-function requireSessionToken(req: Request, _res: Response, next: Function) {
-  const token = req.headers['x-session-token'];
-  if (token === TEST_SESSION_TOKEN) return next();
-  throw new Error('Missing or invalid session token');
-}
-
-function validateWebSocketUpgrade(req: http.IncomingMessage): boolean {
-  const host = req.headers.host;
-  const origin = req.headers.origin;
-  if (!host || !ALLOWED_HOSTS.includes(host)) return false;
-  if (origin && !ALLOWED_ORIGINS.includes(origin)) return false;
-  const url = new URL(req.url ?? '', 'http://localhost');
-  const token = url.searchParams.get('token');
-  if (token !== TEST_SESSION_TOKEN) return false;
-  return true;
-}
+const { validateOrigin, requireSessionToken, validateWebSocketUpgrade } = createRequestBoundary(TEST_PORT, TEST_SESSION_TOKEN);
 
 describe('WebSocket Security', () => {
-  let server: http.Server;
-  let wss: WebSocketServer;
-
-  beforeAll(() => {
-    const app = express();
-    server = http.createServer(app);
-    wss = new WebSocketServer({ noServer: true });
-
-    app.get('/api/session', (_req, res) => res.json({ token: TEST_SESSION_TOKEN }));
-    app.get('/api/test', (req, res, _next) => {
-      try {
-        validateOrigin(req, res, () => {
-          requireSessionToken(req, res, () => res.json({ ok: true }));
-        });
-      } catch (err) {
-        res.status(401).json({ error: String(err) });
-      }
-    });
-
-    server.on('upgrade', (req, socket, head) => {
-      const { pathname } = new URL(req.url ?? '', 'http://localhost');
-      if (pathname === '/ws') {
-        if (!validateWebSocketUpgrade(req)) return void socket.destroy();
-        wss.handleUpgrade(req, socket, head, (ws) => {
-          ws.send(JSON.stringify({ type: 'connected' }));
-          ws.close();
-        });
-      }
-    });
-
-    server.listen(TEST_PORT, '127.0.0.1');
-  });
-
-  it('rejects WebSocket upgrade with missing Origin header', () => {
+  it('accepts WebSocket upgrade with missing Origin header', () => {
     const req = new http.IncomingMessage(null as any);
     req.url = '/ws?token=' + TEST_SESSION_TOKEN;
     req.headers.host = `localhost:${TEST_PORT}`;
