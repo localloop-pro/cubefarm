@@ -1,3 +1,4 @@
+import { blockedCommand } from './gitSafety.ts';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -183,6 +184,8 @@ const IDLE_MS = 30 * 60_000;
 
 /** PreToolUse's answer: nobody may be watching to answer a permission question, so every tool call is approved. */
 const ALLOW = { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: 'Approved by cubefarm' } };
+
+const deny = (reason: string) => ({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
 
 const toolInput = (b: Record<string, unknown>) => (b.tool_input && typeof b.tool_input === 'object' ? b.tool_input : {}) as Record<string, unknown>;
 
@@ -484,7 +487,9 @@ export function startCliSession(opts: SessionOptions, callbacks: SessionCallback
           cb.tool(name);
           if (name === 'mcp__playwright__browser_navigate' && typeof input.url === 'string') cb.browserUrl(input.url);
         }
-        return ALLOW;
+        const command = typeof input.command === 'string' ? input.command : '';
+        const blocked = ['Bash', 'PowerShell', 'shell', 'bash'].includes(name) ? blockedCommand(command) : null;
+        return blocked ? deny(blocked) : ALLOW;
       }
       case 'PostToolUse':
       case 'PostToolUseFailure': {
