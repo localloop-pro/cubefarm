@@ -12,6 +12,7 @@ import { createDemoBackend } from './demo.ts';
 import { underLauncher } from './officeUpdate.ts';
 import { createIssueFromApi } from './issueRoute.ts';
 import { HttpError, Swarm } from './swarm.ts';
+import { createRequestBoundary } from './requestBoundary.ts';
 
 const swarm = new Swarm(DEMO ? createDemoBackend() : realBackend);
 // Sessions the office picks back up while it starts need the address their CLIs call back on before it listens.
@@ -20,6 +21,7 @@ await swarm.init();
 
 // Per-run random session token for CSRF protection and API authentication
 const SESSION_TOKEN = crypto.randomBytes(32).toString('hex');
+const { validateOrigin, requireSessionToken, validateWebSocketUpgrade } = createRequestBoundary(PORT, SESSION_TOKEN);
 
 const app = express();
 // Agent CLIs calling back: hooks (a tool result can be a large screenshot, hence the limit) and the CEO's office tools.
@@ -47,32 +49,11 @@ const str = (v: unknown) => (typeof v === 'string' ? v : '');
 // Repo ids contain a slash ("owner/name"), so they travel URL-encoded as a single segment.
 const repoId = (req: Request) => decodeURIComponent(String(req.params.repo));
 
-// Validate session token (header or body). For requests without a token/body parsed yet, this runs after express.json.
-const requireSessionToken = (req: Request, _res: Response, next: NextFunction) => {
-  const token = req.headers['x-session-token'];
-  if (token === SESSION_TOKEN) return next();
-  throw new HttpError(401, 'Missing or invalid session token');
-};
-
-// Validate Host and Origin headers to defeat DNS rebinding.
-const validateOrigin = (req: Request, _res: Response, next: NextFunction) => {
-  const host = req.headers.host;
-  const origin = req.headers.origin;
-  // Accept either localhost or 127.0.0.1 with the correct port
-  const allowedHosts = [`localhost:${PORT}`, `127.0.0.1:${PORT}`];
-  if (host && !allowedHosts.includes(host)) throw new HttpError(403, 'Invalid Host header');
-  if (origin) {
-    const allowedOrigins = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`];
-    if (!allowedOrigins.includes(origin)) throw new HttpError(403, 'Invalid Origin');
-  }
-  next();
-};
-
+// Hooks and MCP above use their own token paths; all other API requests check the boundary.
+app.use('/api', validateOrigin);
 // Session token endpoint: available to same-origin requests without auth to bootstrap
 app.get('/api/session', (_req, res) => res.json({ token: SESSION_TOKEN }));
 
-// Apply authentication and origin checks to all other /api routes (except /api/hooks and /api/mcp, which use their own token paths)
-app.use('/api', validateOrigin);
 app.use('/api', (req, res, next) => {
   // /api/session and /api/hooks/:token and /api/mcp/:token skip auth; everything else requires the session token
   if (req.path === '/session' || req.path.startsWith('/hooks/') || req.path.startsWith('/mcp/')) return next();
@@ -215,23 +196,6 @@ const wss = new WebSocketServer({ noServer: true });
 const terms = new WebSocketServer({ noServer: true });
 wss.on('connection', (ws) => swarm.addClient(ws));
 terms.on('connection', (ws, req) => swarm.attachTerminal(new URL(req.url ?? '', 'http://localhost').searchParams.get('agent') ?? '', ws));
-
-// Validate Origin and Host headers on WebSocket upgrade, and verify session token in query or first message.
-const validateWebSocketUpgrade = (req: http.IncomingMessage): boolean => {
-  const host = req.headers.host;
-  const origin = req.headers.origin;
-  const allowedHosts = [`localhost:${PORT}`, `127.0.0.1:${PORT}`];
-  if (!host || !allowedHosts.includes(host)) return false;
-  if (origin) {
-    const allowedOrigins = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`];
-    if (!allowedOrigins.includes(origin)) return false;
-  }
-  // Extract session token from query parameter
-  const url = new URL(req.url ?? '', 'http://localhost');
-  const token = url.searchParams.get('token');
-  if (token !== SESSION_TOKEN) return false;
-  return true;
-};
 
 server.on('upgrade', (req, socket, head) => {
   const { pathname } = new URL(req.url ?? '', 'http://localhost');
