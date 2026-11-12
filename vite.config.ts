@@ -12,7 +12,14 @@ export default defineConfig({
     port: clientPort,
     strictPort: true,
     proxy: {
-      '/api': `http://127.0.0.1:${serverPort}`,
+      '/api': {
+        target: `http://127.0.0.1:${serverPort}`,
+        changeOrigin: true,
+        configure: (proxy) => proxy.on('proxyReq', (proxyReq) => {
+          // Same as /ws: the office checks its own Host and Origin port, not Vite's client port.
+          proxyReq.setHeader('Origin', `http://127.0.0.1:${serverPort}`);
+        }),
+      },
       '/ws': {
         target: `ws://127.0.0.1:${serverPort}`,
         ws: true,
