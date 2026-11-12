@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { WORKSPACE_ROOT } from './config.ts';
 import { gh, git, run } from './exec.ts';
-import { installPushGuard } from './gitSafety.ts';
+import { installAgentGitHooks } from './gitSafety.ts';
 
 // Layout on disk:
 //   <your projects folder>/<repo>                    the floor's main checkout: your own folder, only fetched and fast-forwarded (syncMain)
@@ -299,10 +299,6 @@ async function preserveDeskWork(main: string, wt: string, agentSlug: string): Pr
   }
 }
 
-/** Installs the desk's pre-push guard; a failure is logged, not fatal (the prompt and tool hooks still apply). */
-const guardDesk = (wt: string, defaultBranch: string) =>
-  installPushGuard(wt, defaultBranch).catch((err) => console.warn(`Could not install the push guard in ${wt}:`, (err as Error).message));
-
 export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string, branch: string): Promise<string> {
   return withRepoLock(fullName, async () => {
     const main = mainDir(fullName);
@@ -340,7 +336,7 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
         await git(['reset', '--hard', ref], { cwd: wt });
         // Untracked leftovers from the last task go; ignored files (node_modules, build caches) stay.
         await git(['clean', '-fd'], { cwd: wt }).catch(() => undefined);
-        await guardDesk(wt, base.defaultBranch);
+        await installAgentGitHooks(wt, base.defaultBranch);
         return wt;
       } catch {
         // fall through and rebuild the worktree from scratch
@@ -360,7 +356,7 @@ export function prepareDesk(fullName: string, base: DeskBase, agentSlug: string,
     await git(['worktree', 'prune'], { cwd: main });
     await fs.mkdir(path.dirname(wt), { recursive: true });
     await git(['worktree', 'add', '-B', branch, wt, ref], { cwd: main });
-    await guardDesk(wt, base.defaultBranch);
+    await installAgentGitHooks(wt, base.defaultBranch);
     return wt;
   });
 }

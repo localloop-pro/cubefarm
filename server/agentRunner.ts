@@ -1,4 +1,3 @@
-import { blockedCommand } from './gitSafety.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { query, type CanUseTool, type Options, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -7,6 +6,7 @@ import type { OfficeTools } from './ceo.ts';
 import type { UsageWarning } from './pacing.ts';
 import type { AgentTerminal } from './terminal.ts';
 import { VERSION } from './config.ts';
+import { checkAgentShellCommand, type GitSafetyPolicy } from './gitSafety.ts';
 
 // One Claude Code instance (via the Claude Agent SDK) working one issue in its own git worktree.
 // The CEO runs through here too, with the office tools instead of a shell.
@@ -20,6 +20,8 @@ export interface SessionOptions {
   browserTesting: boolean;
   additionalDirectories: string[]; // read-only reference clones of linked repos
   role: AgentRole;
+  /** Default branch on this floor (for enforced git/GitHub rules). */
+  defaultBranch?: string;
   /** JSON schema for a structured final answer (QA reports). */
   outputSchema?: Record<string, unknown>;
   resumeSessionId?: string;
@@ -111,13 +113,18 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
 
 // ---------- permissions and screenshots ----------
 
-// Agents work like the manager's own CLI, but nobody may be watching to answer a permission question: every tool call
-// is approved. The office's rules (branches, pull requests, QA leaving GitHub alone) are in their instructions only.
-// Except the git rules (see gitSafety.ts): no pushes to main, force-pushes or merges.
-const allowAll: CanUseTool = async (toolName, input) => {
-  const blocked = toolName === 'Bash' || toolName === 'PowerShell' ? blockedCommand(typeof input.command === 'string' ? input.command : '') : null;
-  return blocked ? { behavior: 'deny', message: blocked } : { behavior: 'allow', updatedInput: input };
-};
+function agentCanUseTool(policy: GitSafetyPolicy): CanUseTool {
+  return async (toolName, input) => {
+    if (policy.role === 'qa' && (toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit' || toolName === 'NotebookEdit')) {
+      return { behavior: 'deny', message: 'QA agents must not modify the code under test.' };
+    }
+    if (toolName === 'Bash' || toolName === 'PowerShell') {
+      const reason = checkAgentShellCommand(String((input as { command?: string }).command ?? ''), policy);
+      if (reason) return { behavior: 'deny', message: reason };
+    }
+    return { behavior: 'allow', updatedInput: input };
+  };
+}
 
 /**
  * A Playwright screenshot saved to a file (browser_take_screenshot with a filename) comes back as a link, not an
@@ -345,7 +352,7 @@ export function startSession(opts: SessionOptions, callbacks: SessionCallbacks):
       if (line && /error|fail/i.test(line)) cb.log([{ kind: 'error', text: clip(line, 200) }]);
     },
     permissionMode: 'acceptEdits',
-    canUseTool: allowAll,
+    canUseTool: agentCanUseTool({ defaultBranch: opts.defaultBranch ?? 'main', role: opts.role }),
     ...(opts.outputSchema ? { outputFormat: { type: 'json_schema' as const, schema: opts.outputSchema } } : {}),
   };
 
