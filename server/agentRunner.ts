@@ -1,3 +1,4 @@
+import { blockedCommand } from './gitSafety.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { query, type CanUseTool, type Options, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -112,7 +113,11 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
 
 // Agents work like the manager's own CLI, but nobody may be watching to answer a permission question: every tool call
 // is approved. The office's rules (branches, pull requests, QA leaving GitHub alone) are in their instructions only.
-const allowAll: CanUseTool = async (_toolName, input) => ({ behavior: 'allow', updatedInput: input });
+// Except the git rules (see gitSafety.ts): no pushes to main, force-pushes or merges.
+const allowAll: CanUseTool = async (toolName, input) => {
+  const blocked = toolName === 'Bash' || toolName === 'PowerShell' ? blockedCommand(typeof input.command === 'string' ? input.command : '') : null;
+  return blocked ? { behavior: 'deny', message: blocked } : { behavior: 'allow', updatedInput: input };
+};
 
 /**
  * A Playwright screenshot saved to a file (browser_take_screenshot with a filename) comes back as a link, not an
